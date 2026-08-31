@@ -1,0 +1,185 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: "Switzer", "SF Pro Display", system-ui, -apple-system, sans-serif;
+    background-color: #F7F6F3;
+    color: #1E201D;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  h1, h2, h3, h4 {
+    font-family: "Cabinet Grotesk", "SF Pro Display", sans-serif;
+    letter-spacing: -0.03em;
+  }
+
+  ::selection {
+    background-color: rgba(15, 118, 110, 0.2);
+    color: #0B5D56;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply bg-brand-600 text-white font-medium rounded-button px-6 py-3
+           transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)]
+           hover:bg-brand-700 active:scale-[0.97] active:translate-y-px
+           hover:shadow-glow
+           disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:shadow-none;
+  }
+
+  .btn-secondary {
+    @apply bg-transparent text-ink-primary font-medium rounded-button px-6 py-3
+           border border-brand-800/20 transition-all duration-300
+           hover:bg-brand-50 hover:border-brand-600/40 active:scale-[0.97] active:translate-y-px
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+
+  .btn-ghost {
+    @apply bg-brand-900/5 text-ink-primary font-medium rounded-button px-4 py-2
+           transition-all duration-300 hover:bg-brand-900/10
+           active:scale-[0.97] disabled:opacity-40;
+  }
+
+  .btn-danger {
+    @apply bg-transparent text-semantic-error font-medium rounded-button px-4 py-2
+           border border-semantic-error/25 transition-all duration-300
+           hover:bg-semantic-error/10 active:scale-[0.97];
+  }
+
+  .btn-pill {
+    @apply bg-brand-600 text-white font-medium rounded-pill px-8 py-3
+           transition-all duration-300 hover:bg-brand-700 hover:shadow-glow
+           active:scale-[0.97] active:translate-y-px
+           disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:shadow-none;
+  }
+
+  .card {
+    @apply bg-white/90 backdrop-blur-sm rounded-panel border border-brand-900/[0.07]
+           shadow-whisper transition-all duration-300;
+  }
+
+  .card-interactive {
+    @apply card hover:shadow-hover hover:-translate-y-1 hover:border-brand-600/20 cursor-pointer;
+  }
+
+  .card-interactive:active {
+    @apply translate-y-px;
+  }
+
+  .input-field {
+    @apply w-full px-4 py-3 rounded-button border border-brand-900/15 bg-white
+           text-ink-primary text-sm transition-all duration-200
+           focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500
+           placeholder:text-ink-tertiary hover:border-brand-900/25;
+  }
+
+  .eyebrow {
+    @apply text-[11px] font-semibold uppercase tracking-widest-2 text-brand-700;
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 px-3 py-1 rounded-pill text-[11px] font-semibold uppercase tracking-wide;
+  }
+
+  .badge-word {
+    @apply badge bg-category-word/10 text-category-word ring-1 ring-category-word/20;
+  }
+
+  .badge-excel {
+    @apply badge bg-category-excel/10 text-category-excel ring-1 ring-category-excel/20;
+  }
+
+  .badge-powerpoint {
+    @apply badge bg-category-powerpoint/10 text-category-powerpoint ring-1 ring-category-powerpoint/20;
+  }
+
+  .skeleton {
+    @apply bg-canvas-300/60 rounded animate-pulse;
+  }
+
+  .glass-pill {
+    @apply backdrop-blur-xl bg-white/70 border border-white/60
+           shadow-soft rounded-pill;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .transition-default {
+    @apply transition-all duration-300 ease-[cubic-bezier(0.16,1,0.3,1)];
+  }
+
+  .text-serif-display {
+    font-family: "Newsreader", "Playfair Display", Georgia, serif;
+  }
+}
+
+/* Upload dropzone */
+.dropzone {
+  @apply border-2 border-dashed border-brand-900/20 rounded-panel p-10
+         text-center transition-all duration-300 cursor-pointer
+         hover:border-brand-500/50 hover:bg-brand-50/40;
+}
+
+.dropzone.active {
+  @apply border-brand-600 bg-brand-50/60 scale-[1.01] shadow-glow;
+}
+
+/* Floating nav active link */
+.nav-link-active {
+  @apply bg-brand-800 text-white shadow-soft;
+}
+
+/* Grain / noise overlay */
+.bg-grain-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  pointer-events: none;
+  opacity: 0.5;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #C9C5B8;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #A39F94;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
