@@ -41,6 +41,14 @@ def init_db():
             FOREIGN KEY (exam_excel_id) REFERENCES exam_sets(id),
             FOREIGN KEY (exam_powerpoint_id) REFERENCES exam_sets(id)
         );
+
+        CREATE TABLE IF NOT EXISTS modules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            module_id TEXT UNIQUE NOT NULL,
+            exam_pdf_path TEXT NOT NULL,
+            answer_key_pdf_path TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     """)
     conn.commit()
     conn.close()

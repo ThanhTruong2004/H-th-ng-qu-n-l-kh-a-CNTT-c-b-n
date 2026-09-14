@@ -1,124 +1,145 @@
-# ICT DLU - Exam Manager
+# Hệ Thống Quản Lý & Lắp Ráp Đề Thi CNTT Cơ Bản (DLU)
 
-Hệ thống web quản lý và sinh đề thi CNTT (Trường Đại học Đà Lạt). Ứng dụng quản lý đề thi ở cấp độ tệp (.docx, .xlsx, .pptx), tự động chọn ngẫu nhiên để tạo bộ đề mới, ghép bảng tiêu chí chấm điểm thành một tệp duy nhất, và đóng gói thành tệp ZIP để tải về.
+> Ứng dụng web tự động lắp ráp bộ đề thi CNTT cơ bản của Trường Đại học Đà Lạt: cắt ảnh minh họa chính xác, phân trang PDF động, và đóng gói bộ đề (đề thi + đáp án + bảng tiêu chí chấm điểm) thành một tệp ZIP duy nhất.
+
+---
+
+## Mô tả
+
+Hệ thống giải quyết bài toán lắp ráp đề thi vốn làm thủ công, gồm 3 công đoạn tự động hoàn toàn:
+
+1. **Nạp Module theo định dạng chuẩn** — người dùng tải lên file PDF đề thi + đáp án, kèm file nguồn Excel/PowerPoint và ảnh Word, sau đó dùng **công cụ cắt ảnh (cropper)** ngay trên trình duyệt để đánh dấu chính xác 6 vùng ảnh minh họa (preview & rubric cho từng phần Word/Excel/PowerPoint).
+2. **Lắp ráp động** — backend căn giữa và ép ảnh đúng khổ trang A4 theo thuật toán phân trang động (`stack_images`), giữ nguyên dải bbox chuẩn của mẫu đề mà không bao giờ lệch định dạng.
+3. **Phát hành** — người dùng chọn module (ngẫu nhiên hoặc thủ công), nhập ngày thi/mã đề/cán bộ ra đề, **xem trước** trực tiếp trong trình duyệt rồi tải bộ đề về dưới dạng **ZIP** gồm file đề (`MaDe_*.pdf`), đáp án (`DapAn_*.pdf`) và bảng tiêu chí chấm điểm (Excel/PPT).
+
+Hệ thống bám sát một mẫu định dạng đề thi cố định: header trường, khối hướng dẫn, phần trắc nghiệm, marker `HẾT`, footer phân trang, chữ ký — đảm bảo mọi bộ đề phát ra đều **chuẩn quy cách**.
+
+## Tính năng chính
+
+- **Cắt ảnh thông minh trên trình duyệt** (Cropper.js): render trang PDF thành ảnh, kéo khung chọn vùng, cắt nhiều ảnh cho một vùng khi nội dung trải nhiều trang.
+- **Phân trang PDF động**: hình minh họa được scale + tự động xuống trang mới khi vượt khổ, sau đó footer phân trang được chèn chính xác (không render HTML hai lần).
+- **Nén ảnh tối ưu**: tất cả ảnh crop được nén JPEG (quality 75) ngay trong bộ nhớ trước khi nhúng vào PDF, giảm tới ~90% kích thước tệp xuất ra.
+- **Playwright singleton**: trình Chromium dùng chung cho toàn bộ vòng đời tiến trình, giảm độ trễ render HTML→PDF.
+- **Xem trước & tải ZIP** chỉ với một nút bấm; backend chạy hoàn toàn trong Docker, dữ liệu lưu trữ bền vững qua named volume.
 
 ## Tech Stack
 
-- **Backend**: Python FastAPI + SQLite
-- **Frontend**: Vue 3 + Tailwind CSS + Vite
-- **Containerization**: Docker + Docker Compose
-- **Design**: Editorial-Luxury & Soft-Structuralism (tham khảo taste-skill & superpowers)
+| Layer | Công nghệ |
+|-------|-----------|
+| Backend | Python **FastAPI**, PyMuPDF (**fitz**), **Playwright**, Jinja2, SQLite |
+| Frontend | **Vue 3** (Composition API), **TailwindCSS**, Vite, Cropper.js |
+| Vận hành | **Docker** + **Docker Compose**, Nginx reverse proxy |
 
-## Prerequisites
+## Yêu cầu
 
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (required)
-- [Git](https://git-scm.com/)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Docker Engine + Compose)
+- Git (nếu muốn clone và đóng góp)
 
-## Quick Start
+## Khởi chạy nhanh
 
 ```bash
-git clone https://github.com/[your-username]/ITExamManager.git
+git clone <your-repo-url> ITExamManager
 cd ITExamManager
 docker-compose up --build
 ```
 
-The application will be available at **http://localhost:8000**
+Ứng dụng khả dụng tại: **http://localhost:8000**
 
-## Project Structure
+> Backend chỉ `expose` cổng nội bộ 8000; mọi truy cập đi qua Nginx (frontend) — an toàn, không lộ API ra ngoài.
+
+## Hướng dẫn sử dụng
+
+### Bước 1 — Nạp Module (tab *Upload*)
+
+1. Nhập **Mã Module** (vd: `SET_1904C`).
+2. Tải lên: **Đề thi gốc (PDF)**, **Đáp án gốc (PDF)**, **Excel gốc (.xlsx)**, **PowerPoint gốc (.pptx)**, và (tùy chọn) các **ảnh Word Assets**.
+3. Bấm **Render Trang PDF** → mỗi ô trong lưới `Word Preview / Excel Preview / PPT Preview / Word Rubric / Excel Rubric / PPT Rubric` đều có thể mở cropper để kéo khung chọn 6 vùng ảnh minh họa.
+4. Bấm **Tải Lên Module**. Module xuất hiện trong Library và Generate.
+
+### Bước 2 — Tạo bộ đề (tab *Generate*)
+
+1. Nhập **Ngày Thi**, **Mã Đề**, **Cán Bộ Ra Đề**.
+2. Chọn module theo cách **ngẫu nhiên** (mặc định) hoặc **thủ công** cho từng phần.
+3. Bấm **Xem Trước** để kiểm tra đề & đáp án trong trình duyệt, hoặc **Tạo Đề & Tải ZIP**.
+
+### Bước 3 — Quản lý (tab *Library*)
+
+Xem danh sách module đã nạp, làm mới và xóa module.
+
+## Cấu trúc dự án
 
 ```
 ITExamManager/
-├── docker-compose.yml          # Orchestrates backend + frontend containers
-├── .dockerignore
+├── docker-compose.yml            # Orchestrate backend + frontend, named volume exam-data
+├── .dockerignore                 # Nguồn build tối giản
 ├── backend/
-│   ├── main.py                 # FastAPI application & API routes
-│   ├── database.py             # SQLite schema & connection management
-│   ├── models.py               # Pydantic request/response models
-│   ├── file_utils.py           # File handling, Excel merging, ZIP packaging
-│   ├── requirements.txt        # Python dependencies
-│   └── Dockerfile
-├── frontend/
-│   ├── src/
-│   │   ├── App.vue             # Main layout with tab navigation
-│   │   ├── api.js              # API client layer
-│   │   ├── style.css           # Tailwind CSS + component classes
-│   │   └── components/
-│   │       ├── UploadPanel.vue      # Drag-and-drop file upload
-│   │       ├── LibraryPanel.vue     # Browse, filter, delete exam sets
-│   │       └── GeneratePanel.vue    # Generate & download exam sets
-│   ├── tailwind.config.js      # Design tokens & theme configuration
-│   ├── vite.config.js          # Vite build configuration
-│   ├── nginx.conf              # Reverse proxy to backend API
-│   ├── package.json
-│   └── Dockerfile
+│   ├── Dockerfile                # python:3.10-slim + Playwright Chromium
+│   ├── main.py                   # FastAPI app: các route API chính
+│   ├── database.py               # SQLite schema & kết nối
+│   ├── models.py                 # Pydantic models
+│   ├── file_utils.py            # Xử lý tệp, ZIP packaging, đường dẫn dữ liệu
+│   ├── requirements.txt
+│   ├── services/
+│   │   └── pdf_generator.py     # Lắp ráp PDF: stack_images, phân trang, footer, Playwright singleton
+│   └── templates/                # exam_p1.html, answer_key_p1.html, answer_key_p4.html
+└── frontend/
+    ├── Dockerfile
+    ├── nginx.conf                # Proxy /api/ → backend:8000 (timeout 300s)
+    └── src/
+        ├── App.vue               # Layout + điều hướng tab
+        ├── api.js                # API client
+        ├── style.css
+        └── components/
+            ├── UploadPdfForm.vue # Nạp PDF + cropper 6 vùng ảnh
+            ├── LibraryPanel.vue  # Danh sách module
+            └── GeneratePanel.vue # Tạo đề / xem trước / tải ZIP
 ```
 
-## How It Works
+## API Endpoints
 
-### 1. Upload Exam Sets
-
-- Upload an exam file (.docx, .xlsx, .pptx) along with its associated grading criteria (.xlsx)
-- The system auto-detects the category (Word, Excel, PowerPoint)
-- Files are stored persistently via Docker volumes
-
-### 2. Browse Library
-
-- View all uploaded exam sets
-- Filter by category (Word / Excel / PowerPoint)
-- Delete individual sets
-
-### 3. Generate Exam Sets
-
-- The system requires at least 1 file in each category (Word, Excel, PowerPoint)
-- Choose how many unique sets to generate (1-50)
-- Each generated set contains:
-  - 1 randomly selected Word exam
-  - 1 randomly selected Excel exam
-  - 1 randomly selected PowerPoint exam
-  - 1 merged Final_Grading_Sheet.xlsx (combining all 3 criteria files)
-- Download as a single ZIP file
+| Method | Endpoint | Mô tả |
+|--------|----------|-------|
+| GET | `/api/health` | Kiểm tra sức khỏe |
+| POST | `/api/modules/pages` | Render các trang PDF ra base64 để cắt ảnh |
+| POST | `/api/modules/ingest` | Nạp module (PDF + crops + file nguồn) |
+| GET | `/api/modules` | Danh sách module |
+| DELETE | `/api/modules/{module_id}` | Xóa module |
+| POST | `/api/generate/preview` | Sinh đề + đáp án, trả URL xem trước |
+| GET | `/api/preview/{token}/{kind}` | Tải file preview theo token |
+| POST | `/api/generate/download` | Sinh và trả về bộ đề dạng ZIP |
 
 ## Docker Volumes
 
-Data persists across container restarts via named Docker volumes:
+Dữ liệu người dùng được lưu trong **named volume** `exam-data` (mount vào `/data` trong container backend) — **không mất khi container khởi động lại**:
 
-| Volume | Purpose |
-|--------|---------|
-| `exam-data` | Stores SQLite database + uploaded files + generated ZIPs |
+| Đường dẫn trong container | Nội dung |
+|---------------------------|----------|
+| `/data/exams.db` | Cơ sở dữ liệu SQLite |
+| `/data/uploads/` | PDF gốc + ảnh crop (PNG/JPEG) của các module |
+| `/data/outputs/` | PDF đề thi/đáp án đã sinh + các tệp ZIP |
 
-## Development (without Docker)
+## Ghi chú kỹ thuật
 
-### Backend
+- **Chỉ render HTML một lần**: số trang cuối được xác định từ tài liệu ảnh trước, sau đó trang html đầu tiên được render duy nhất một lần với `tong_so_trang` đúng.
+- **Ép ảnh chuẩn khung**: mọi ảnh crop nhúng vào PDF theo dải bbox cố định (`85.04` … `538.59`, khổ A4), ép đúng max-width `453.55`, giữ tỷ lệ, top-anchor.
+- **Fonts**: mặc định dùng Liberation Serif trong container; có thể ghi đè bằng biến môi trường `EXAM_FONT_FILE` / `EXAM_FONT_BOLD_FILE`.
+
+## Phát triển cục bộ (không cần Docker)
 
 ```bash
+# Backend
 cd backend
 pip install -r requirements.txt
-set DB_PATH=./exams.db
-set UPLOAD_DIR=./uploads
-set OUTPUT_DIR=./outputs
+python -m playwright install chromium
+set DB_PATH=./data/exams.db
+set UPLOAD_DIR=./data/uploads
+set OUTPUT_DIR=./data/outputs
 uvicorn main:app --reload --port 8000
-```
 
-### Frontend
-
-```bash
+# Frontend
 cd frontend
 npm install
 npm run dev
 ```
 
-The Vite dev server proxies `/api` requests to `http://localhost:8000`.
-
-## API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/health` | Health check |
-| GET | `/api/stats` | Get exam counts by category |
-| GET | `/api/sets` | List all exam sets |
-| POST | `/api/sets/upload` | Upload exam + criteria files |
-| DELETE | `/api/sets/{id}` | Delete an exam set |
-| POST | `/api/generate` | Generate random exam sets |
-| GET | `/api/generated` | List generated sets |
-| GET | `/api/download/{filename}` | Download generated ZIP |
-| DELETE | `/api/generated/{id}` | Delete a generated set |
+Frontend dev server proxy `/api` về `http://localhost:8000`.

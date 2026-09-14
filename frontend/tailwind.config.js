@@ -7,73 +7,85 @@ export default {
   theme: {
     extend: {
       colors: {
-        // DLU Academic palette - Editorial Luxury + Soft Structuralism
-        canvas: {
-          50: '#F7F6F3',   // primary warm off-white
-          100: '#FBFBFA',
-          200: '#EFEEE9',
-          300: '#E3E1DA',
+        // DLU Pine/Forest Green - primary brand
+        pine: {
+          50: '#f0f7f3',
+          100: '#dcefe3',
+          200: '#b9dfc8',
+          300: '#8bc7a6',
+          400: '#57a87e',
+          500: '#348a5f',
+          600: '#226d48',   // primary
+          700: '#1b573b',
+          800: '#174531',
+          900: '#133828',
+          950: '#0a1f17',
         },
-        // Deep academic teal - primary brand
-        brand: {
-          50: '#ECF7F5',
-          100: '#D2ECE7',
-          200: '#A5D9D0',
-          300: '#6DBFB3',
-          400: '#3CA391',
-          500: '#1E7F6F',
-          600: '#0F766E',
-          700: '#0B5D56',
-          800: '#11453F',
-          900: '#0E3531',
-          950: '#072220',
+        // DLU Earthy Brown/Wood - accents & secondary borders
+        wood: {
+          50: '#faf6f1',
+          100: '#f1e7dc',
+          200: '#e2cdb7',
+          300: '#d0ab88',
+          400: '#bd865c',
+          500: '#ad6c3f',   // accent
+          600: '#a05b33',
+          700: '#854a2c',
+          800: '#6b3d27',
+          900: '#593422',
+          950: '#301911',
         },
+        // Frosted glass surfaces (deep frosted glass over dark overlay)
+        glass: {
+          light: 'rgba(255,255,255,0.18)',
+          medium: 'rgba(255,255,255,0.25)',
+          strong: 'rgba(255,255,255,0.34)',
+          dark: 'rgba(255,255,255,0.45)',
+          border: 'rgba(255,255,255,0.35)',
+          borderStrong: 'rgba(255,255,255,0.45)',
+        },
+        // Text - pure white, high contrast on dark glass over dark overlay
         ink: {
-          primary: '#1E201D',   // espresso off-black, never pure black
-          secondary: '#6E6A61',
-          tertiary: '#A39F94',
-        },
-        // Portrait accent - warm cream for hero
-        cream: {
-          DEFAULT: '#F4EFE4',
-          light: '#FAF6EE',
-          deep: '#E6DECC',
+          primary: '#ffffff',
+          secondary: '#f1f5f9',
+          tertiary: '#cbd5e1',
+          onlight: '#1e293b',
         },
         semantic: {
-          success: '#2FA06A',
-          warning: '#D99A2B',
-          error: '#C4453B',
+          success: '#4ade80',
+          warning: '#fbbf24',
+          error: '#f87171',
         },
         category: {
-          word: '#2563eb',
-          excel: '#16a34a',
-          powerpoint: '#dc2626',
+          word: '#93c5fd',
+          excel: '#86efac',
+          powerpoint: '#fca5a5',
         }
       },
       fontFamily: {
         sans: ['"Switzer"', '"SF Pro Display"', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'sans-serif'],
         display: ['"Cabinet Grotesk"', '"SF Pro Display"', '"Plus Jakarta Sans"', 'system-ui', 'sans-serif'],
-        serif: ['"Newsreader"', '"Playfair Display"', 'Georgia', 'serif'],
       },
       borderRadius: {
         'card': '16px',
         'panel': '24px',
-        'button': '9999px',
         'pill': '9999px',
       },
       boxShadow: {
-        'whisper': '0 20px 40px -15px rgba(14,53,49,0.08)',
-        'hover': '0 12px 28px -12px rgba(14,53,49,0.18)',
-        'soft': '0 2px 12px rgba(14,53,49,0.06)',
-        'glow': '0 10px 40px -10px rgba(15,118,110,0.45)',
-        'inner-light': 'inset 0 1px 0 rgba(255,255,255,0.12)',
+        'glow-soft': '0 8px 32px rgba(16,44,32,0.12)',
+        'glow': '0 10px 40px -8px rgba(52,138,95,0.45)',
+        'glow-wood': '0 10px 40px -8px rgba(173,108,63,0.45)',
+        'glass': '0 8px 32px 0 rgba(13,40,28,0.18)',
+      },
+      backdropBlur: {
+        xs: '2px',
       },
       animation: {
-        'fade-in': 'fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1)',
-        'slide-up': 'slideUp 0.5s cubic-bezier(0.16, 1, 0.3, 1)',
-        'slide-up-slow': 'slideUp 0.7s cubic-bezier(0.16, 1, 0.3, 1)',
-        'pulse-soft': 'pulseSoft 2s ease-in-out infinite',
-        'shimmer': 'shimmer 1.8s linear infinite',
+        'fade-in': 'fadeIn 0.4s cubic-bezier(0.16,1,0.3,1)',
+        'slide-up': 'slideUp 0.5s cubic-bezier(0.16,1,0.3,1)',
+        'slide-up-slow': 'slideUp 0.7s cubic-bezier(0.16,1,0.3,1)',
+        'pulse-soft': 'pulseSoft 2.2s ease-in-out infinite',
+        'spin-slow': 'spin 1s linear infinite',
       },
       keyframes: {
         fadeIn: {
@@ -86,19 +98,9 @@ export default {
         },
         pulseSoft: {
           '0%, 100%': { opacity: '1' },
-          '50%': { opacity: '0.65' },
-        },
-        shimmer: {
-          '0%': { backgroundPosition: '-300px 0' },
-          '100%': { backgroundPosition: '300px 0' },
+          '50%': { opacity: '0.6' },
         },
       },
-      backgroundImage: {
-        'grain': "radial-gradient(circle at 20% 20%, rgba(21,94,85,0.06), transparent 40%), radial-gradient(circle at 80% 0%, rgba(15,118,110,0.08), transparent 45%)",
-      },
-      letterSpacing: {
-        'widest-2': '0.25em',
-      }
     },
   },
   plugins: [],

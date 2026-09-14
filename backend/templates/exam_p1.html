@@ -1,0 +1,54 @@
+﻿<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<style>
+  @page { size: A4; margin: 1cm 2cm 2cm 3cm; }
+  body {
+    font-family: "Times New Roman", serif;
+    font-size: 13pt;
+    line-height: 1.5;
+    margin: 0;
+    color: #000;
+  }
+</style>
+</head>
+<body>
+<div style="text-align: center; font-weight: bold; font-size: 13pt;">
+  TRƯỜNG ĐẠI HỌC ĐÀ LẠT<br>
+  TRUNG TÂM CÔNG NGHỆ THÔNG TIN<br>
+  ĐỀ THI THỰC HÀNH ỨNG DỤNG CÔNG NGHỆ THÔNG TIN CƠ BẢN<br>
+  Ngày thi: {{ ngay_thi }}<br>
+  Thời gian làm bài: 90 phút<br>
+  Mã đề thi: {{ ma_de }}
+</div>
+<div style="text-align: center; font-style: italic; margin-top: 5px; font-size: 13pt;">
+  (Thí sinh không sử dụng tài liệu. Cán bộ coi thi không giải thích gì thêm)
+</div>
+<div style="font-weight: bold; text-decoration: underline; text-underline-offset: 4px; margin-top: 10px; font-size: 13pt;">Hướng dẫn:</div>
+<div style="font-size: 13pt;">
+  1. Thí sinh đọc kỹ đề trước khi làm. Đề thi gồm có <b>{{ tong_so_trang }} trang</b>, bao gồm <b>04 phần</b>:<br>
+  <span style="display: inline-block; margin-left: 20px;">&#10148; Phần 1: Microsoft Windows</span><br>
+  <span style="display: inline-block; margin-left: 20px;">&#10148; Phần 2: Microsoft Word</span><br>
+  <span style="display: inline-block; margin-left: 20px;">&#10148; Phần 3: Microsoft Excel</span><br>
+  <span style="display: inline-block; margin-left: 20px;">&#10148; Phần 4: Microsoft PowerPoint</span><br>
+  2. Đối với các tập tin được cung cấp, thí sinh kiểm tra lại Compatibility mode trước khi tiến hành làm bài.<br>
+  3. Trong quá trình làm bài, thí sinh lưu bài thường xuyên, tránh bị mất bài khi thiết bị có sự cố.<br>
+  4. Các bài lưu không đúng thư mục sẽ không được tính điểm.
+</div>
+<div style="font-weight: bold; text-decoration: underline; text-underline-offset: 4px; margin-top: 10px; font-size: 13pt;">PHẦN 1: MICROSOFT WINDOWS (1 điểm)</div>
+<ul style="margin: 0; padding-left: 20px; font-size: 13pt; list-style-type: disc;">
+  <li><b>Câu 1.</b> Thí sinh truy cập ổ đĩa <b>Z:\</b> tạo thư mục để lưu toàn bộ bài thi của mình, đặt tên theo cú pháp <b>“PCxxx_SBD”</b> (sau đây sẽ gọi là thư mục nộp bài), trong đó:<br>
+    <span style="display: inline-block; margin-left: 20px;">&#10148; PCxxx: Là tên máy tính của thí sinh đang ngồi thi – viết liền, không có dấu cách.</span><br>
+    <span style="display: inline-block; margin-left: 20px;">&#10148; SBD: Là số báo danh trên thẻ dự thi của thí sinh.</span>
+  </li>
+  <li><b>Câu 2.</b> Trong thư mục nộp bài vừa tạo ở câu 1. Thí sinh tiến hành thao tác sau:<br>
+    <span style="display: inline-block; margin-left: 20px;">&#10148; Cắt file Excel đã được cung cấp trong ổ đĩa Z:\ có tên <b>DLM_{{ ma_de | upper }}.xlsx</b> và chuyển vào thư mục nộp bài. Đổi tên tập tin theo cú pháp <b>“SBD_Mã đề thi”.xlsx</b> để làm bài thi.</span><br>
+    <span style="display: inline-block; margin-left: 20px;">&#10148; Cắt file Powerpoint đã được cung cấp trong ổ đĩa Z:\ có tên <b>DLM.pptx</b> và chuyển vào thư mục nộp bài. Đổi tên lại theo cú pháp <b>“SBD_Mã đề thi”.pptx</b> để làm bài thi.</span><br>
+    <span style="display: inline-block; margin-left: 20px;">&#10148; Tạo file Word lưu vào thư mục nộp bài theo cú pháp <b>“SBD_Mã đề thi”.docx</b>.</span>
+  </li>
+</ul>
+<div style="font-weight: bold; text-decoration: underline; text-underline-offset: 4px; margin-top: 10px; font-size: 13pt;">PHẦN 2: MICROSOFT WORD (3,5 điểm)</div>
+<div style="font-size: 13pt;">Sử dụng các file ảnh đã cho trong ổ đĩa Z:\ và file Word đã tạo để thực hiện văn bản theo mẫu sau:</div>
+</body>
+</html>

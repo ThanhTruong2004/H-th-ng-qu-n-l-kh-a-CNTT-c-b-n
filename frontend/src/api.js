@@ -18,24 +18,26 @@ export function useApi() {
   const loading = ref(false)
   const error = ref(null)
 
-  async function fetchStats() {
-    return request('/stats')
-  }
-
-  async function fetchSets(category = null) {
-    const params = category ? `?category=${category}` : ''
-    return request(`/sets${params}`)
-  }
-
-  async function uploadSet(examFile, criteriaFile, name = '') {
+  async function ingestModule(moduleId, examPdf, answerKeyPdf, wordAssets, excelFile, pptFile, crops = {}) {
     loading.value = true
     error.value = null
     try {
       const formData = new FormData()
-      formData.append('exam', examFile)
-      formData.append('criteria', criteriaFile)
-      formData.append('name', name)
-      return await request('/sets/upload', { method: 'POST', body: formData })
+      formData.append('module_id', moduleId)
+      formData.append('exam_raw_pdf', examPdf)
+      formData.append('answer_key_raw_pdf', answerKeyPdf)
+      for (const f of wordAssets) {
+        formData.append('word_assets', f)
+      }
+      formData.append('excel_raw_file', excelFile)
+      formData.append('ppt_raw_file', pptFile)
+      for (const [key, list] of Object.entries(crops)) {
+        const files = Array.isArray(list) ? list : (list ? [list] : [])
+        for (const file of files) {
+          if (file) formData.append(key, file)
+        }
+      }
+      return await request('/modules/ingest', { method: 'POST', body: formData })
     } catch (e) {
       error.value = e.message
       throw e
@@ -44,11 +46,14 @@ export function useApi() {
     }
   }
 
-  async function deleteSet(id) {
+  async function fetchModulePages(examPdf, answerKeyPdf) {
     loading.value = true
     error.value = null
     try {
-      return await request(`/sets/${id}`, { method: 'DELETE' })
+      const formData = new FormData()
+      if (examPdf) formData.append('exam_raw_pdf', examPdf)
+      if (answerKeyPdf) formData.append('answer_key_raw_pdf', answerKeyPdf)
+      return await request('/modules/pages', { method: 'POST', body: formData })
     } catch (e) {
       error.value = e.message
       throw e
@@ -57,14 +62,31 @@ export function useApi() {
     }
   }
 
-  async function generateExams(count = 1) {
+  async function fetchModules() {
+    return request('/modules')
+  }
+
+  async function deleteModule(moduleId) {
     loading.value = true
     error.value = null
     try {
-      return await request('/generate', {
+      return await request(`/modules/${encodeURIComponent(moduleId)}`, { method: 'DELETE' })
+    } catch (e) {
+      error.value = e.message
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
+  async function generatePreview(payload) {
+    loading.value = true
+    error.value = null
+    try {
+      return await request('/generate/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count }),
+        body: JSON.stringify(payload),
       })
     } catch (e) {
       error.value = e.message
@@ -74,38 +96,55 @@ export function useApi() {
     }
   }
 
-  async function downloadFile(filename) {
-    const res = await fetch(`${API_BASE}/download/${filename}`)
-    if (!res.ok) throw new Error('Download failed')
-    const blob = await res.blob()
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = filename
-    document.body.appendChild(a)
-    a.click()
-    document.body.removeChild(a)
-    URL.revokeObjectURL(url)
+  async function fetchBlob(url) {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error('Failed to load preview')
+    return res.blob()
   }
 
-  async function fetchGenerated() {
-    return request('/generated')
-  }
-
-  async function deleteGenerated(id) {
-    return request(`/generated/${id}`, { method: 'DELETE' })
+  async function generateDownload(payload) {
+    loading.value = true
+    error.value = null
+    try {
+      const res = await fetch(`${API_BASE}/generate/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Request failed' }))
+        throw new Error(err.detail || 'Request failed')
+      }
+      const blob = await res.blob()
+      const disposition = res.headers.get('Content-Disposition') || ''
+      const match = disposition.match(/filename="?([^";]+)"?/i)
+      const filename = match ? match[1] : 'DLU_Exam.zip'
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      return { filename }
+    } catch (e) {
+      error.value = e.message
+      throw e
+    } finally {
+      loading.value = false
+    }
   }
 
   return {
     loading,
     error,
-    fetchStats,
-    fetchSets,
-    uploadSet,
-    deleteSet,
-    generateExams,
-    downloadFile,
-    fetchGenerated,
-    deleteGenerated,
+    ingestModule,
+    fetchModulePages,
+    fetchModules,
+    deleteModule,
+    generatePreview,
+    generateDownload,
+    fetchBlob,
   }
 }

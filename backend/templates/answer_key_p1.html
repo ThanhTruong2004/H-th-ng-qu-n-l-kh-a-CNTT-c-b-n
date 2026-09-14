@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: 'Times New Roman', serif; font-size: 13pt; line-height: 1.5; margin: 0; }
+  @page { size: A4; margin: 1cm 2cm 2cm 3cm; }
+  table.rubric, table.rubric th, table.rubric td { border: 1px solid black; border-collapse: collapse; }
+  table.rubric th, table.rubric td { padding: 6px; }
+</style>
+</head>
+<body>
+
+<table style="width: 100%; font-size: 13pt; text-align: center; border: none; margin-bottom: 10px;">
+  <tr>
+    <td style="width: 50%; vertical-align: top; border: none;">
+      TRƯỜNG ĐẠI HỌC ĐÀ LẠT<br>
+      <span style="font-weight: bold; text-decoration: underline; text-underline-offset: 4px;">TRUNG TÂM CNTT</span>
+    </td>
+    <td style="width: 50%; vertical-align: top; border: none;">
+      <b>ĐÁP ÁN MÃ ĐỀ: {{ ma_de | upper }}</b><br>
+      THI THỰC HÀNH ỨNG DỤNG<br>
+      CÔNG NGHỆ THÔNG TIN CƠ BẢN<br>
+      <b>Kỳ thi: {{ ngay_thi }}</b>
+    </td>
+  </tr>
+</table>
+
+<hr style="border: 0; border-top: 4px double black; margin-bottom: 20px;">
+
+<div style="font-weight: bold; font-size: 13pt; margin-bottom: 10px;">Phần 1: Microsoft Windows (1.0 đ)</div>
+
+<table class="rubric" style="width: 100%; font-size: 13pt;">
+  <thead>
+    <tr>
+      <th style="width: 8%; text-align: center;">STT</th>
+      <th style="text-align: center;">Nội dung</th>
+      <th style="width: 12%; text-align: center;">Điểm</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td style="text-align: center;">1</td>
+      <td>Tạo đúng tên thư mục: <b>Số máy_Số báo danh</b></td>
+      <td style="text-align: center;">0.25</td>
+    </tr>
+    <tr>
+      <td style="text-align: center;" rowspan="2">2</td>
+      <td>Thao tác cắt file và đổi tên theo yêu cầu đúng tên file PowerPoint: <b>SBD_Mã đề thi.pptx</b></td>
+      <td style="text-align: center;">0.25</td>
+    </tr>
+    <tr>
+      <td>Thao tác cắt file và đổi tên theo yêu cầu đúng tên file Excel:<br><b>SBD_Mã đề thi.xlsx</b></td>
+      <td style="text-align: center;">0.25</td>
+    </tr>
+    <tr>
+      <td style="text-align: center;"></td>
+      <td>Tạo được file word đúng tên, lưu đúng vị trí theo yêu cầu.</td>
+      <td style="text-align: center;">0.25</td>
+    </tr>
+  </tbody>
+</table>
+
+</body>
+</html>

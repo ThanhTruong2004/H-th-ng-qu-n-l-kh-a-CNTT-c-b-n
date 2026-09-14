@@ -1,13 +1,58 @@
+# ============================================================
+# Hệ Thống Quản Lý & Lắp Ráp Đề Thi CNTT (DLU) — .gitignore
+# ============================================================
+
+# ---------- Python ----------
 __pycache__/
-*.pyc
-node_modules/
-frontend/dist/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
 .env
-*.db
-data/
-backend/uploads/
-backend/outputs/
+.env.*
+!.env.example
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# ---------- Node / Vue ----------
+node_modules/
+dist/
+dist-ssr/
+*.local
+.npm
+.yarn
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.vite/
+
+# ---------- System / Editor ----------
 .DS_Store
+Thumbs.db
+Desktop.ini
 .vscode/
 .idea/
-*.log
+*.swp
+*.swo
+*~
+
+# ---------- Project data: raw PDFs, cropped images, output ZIPs ----------
+backend/data/
+backend/uploads/
+backend/outputs/
+data/
+uploads/
+outputs/
+*.db
+*.sqlite3
+coverage/
+htmlcov/
+
+# Keep candidate templates / static assets trackable:
+!backend/templates/
+!frontend/public/
