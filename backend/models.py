@@ -9,3 +9,8 @@ class GeneratePdfRequest(BaseModel):
     word_module_id: Optional[int] = None
     excel_module_id: Optional[int] = None
     ppt_module_id: Optional[int] = None
+
+
+class DownloadRequest(BaseModel):
+    generation_id: str
+    ma_de: str

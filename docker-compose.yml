@@ -12,6 +12,11 @@ services:
       - DB_PATH=/data/exams.db
       - UPLOAD_DIR=/data/uploads
       - OUTPUT_DIR=/data/outputs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
   frontend:
@@ -23,6 +28,11 @@ services:
       - "8000:80"
     depends_on:
       - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     restart: unless-stopped
 
 volumes:

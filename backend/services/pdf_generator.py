@@ -8,9 +8,10 @@ Playwright Chromium, then stitches the sliced images (Phase 1) with PyMuPDF
 import atexit
 import io
 import os
+import queue
 import re
-import shutil
-import tempfile
+import threading
+import time
 from typing import List, Tuple
 
 import fitz
@@ -18,7 +19,7 @@ from PIL import Image
 from jinja2 import Environment, FileSystemLoader
 from playwright.sync_api import sync_playwright
 
-from file_utils import UPLOAD_DIR
+from file_utils import UPLOAD_DIR, format_ngay_thi
 
 # ---------------------------------------------------------------------------
 # Page geometry (A4 in points)
@@ -42,17 +43,71 @@ TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 # ---------------------------------------------------------------------------
-# Playwright singleton — one Chromium process for the entire app lifetime.
-# Lazy-initialized on first render call (runs in a worker thread with no
-# asyncio event loop, so sync_playwright works fine).
+# Dedicated render thread — Playwright sync API is pinned to ONE thread.
+# Calls via run_in_threadpool() can land on different anyio pool threads; using
+# sync_playwright from a different thread than the one that started it raises
+# 'greenlet.error: cannot switch to a different thread'. Routing every render
+# through this single worker makes generation deterministic (Phase 13.1).
 # ---------------------------------------------------------------------------
-_pw = None      # sync Playwright instance (kept alive)
-_browser = None # sync Browser object (reused across render calls)
+_render_queue = queue.Queue()
+_render_worker = None
+_render_worker_lock = threading.Lock()
+_pw = None       # sync Playwright instance (owned by the render thread)
+_browser = None  # sync Browser object (owned by the render thread)
+
+# Chromium memory-leak restart (AUDIT-23 Fix 5): the long-lived singleton's
+# footprint grows over ~10h uptime (500MB-1GB). Force a clean relaunch every
+# hour to bound memory.
+_browser_launch_time = 0.0
+_BROWSER_MAX_AGE = 3600  # seconds (1 hour)
+
+
+def _ensure_render_worker():
+    global _render_worker
+    with _render_worker_lock:
+        if _render_worker is not None:
+            return
+        def _render_loop():
+            while True:
+                fn, args, kwargs, resp_q = _render_queue.get()
+                if fn is None:
+                    resp_q.put(None)
+                    return
+                try:
+                    resp_q.put(("ok", fn(*args, **kwargs), None))
+                except BaseException as e:  # noqa: BLE001
+                    resp_q.put(("err", None, e))
+        _render_worker = threading.Thread(
+            target=_render_loop, name="pdf-render-worker", daemon=True,
+        )
+        _render_worker.start()
+
+
+def _call_render(fn, *args, **kwargs):
+    """Submit a render callable to the single worker thread and wait."""
+    _ensure_render_worker()
+    resp_q = queue.Queue()
+    _render_queue.put((fn, args, kwargs, resp_q))
+    status, result, exc = resp_q.get()
+    if status == "err":
+        raise exc
+    return result
 
 
 def _ensure_browser():
-    """Return the live browser, launching lazily on first call."""
-    global _pw, _browser
+    """Return the live browser, launching lazily on first call.
+
+    IMPORTANT: only ever called from the dedicated pdf-render-worker thread —
+    never from request/anyio threads."""
+    global _pw, _browser, _browser_launch_time
+    # AUDIT-23 Fix 5: force a clean relaunch once the current Chromium has
+    # been alive for more than an hour (bounded memory regardless of leaks).
+    if _browser is not None and time.time() - _browser_launch_time > _BROWSER_MAX_AGE:
+        try:
+            _browser.close()
+        except Exception:
+            pass
+        _browser = None
     if _browser is not None and _browser.is_connected():
         return _browser
     if _browser is not None:
@@ -66,11 +121,13 @@ def _ensure_browser():
     _browser = _pw.chromium.launch(
         args=["--no-sandbox", "--disable-setuid-sandbox"],
     )
+    _browser_launch_time = time.time()
     return _browser
 
 
 def shutdown_browser():
-    """Tear down the browser on app shutdown."""
+    """Tear down the browser on app shutdown (called from the main thread, so
+    Playwright errors are swallowed — the process is exiting anyway)."""
     global _pw, _browser
     try:
         if _browser:
@@ -88,6 +145,37 @@ def shutdown_browser():
 
 def _env() -> Environment:
     return Environment(loader=FileSystemLoader(TEMPLATE_DIR))
+
+
+def _render_inline(template_name, out_path, as_bytes, **ctx):
+    """Actual Playwright render — executes only on the dedicated render thread."""
+    html = _env().get_template(template_name).render(**ctx)
+    browser = _ensure_browser()
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.set_content(html, wait_until="load")
+        if as_bytes:
+            return page.pdf(format="A4", print_background=True,
+                            prefer_css_page_size=True)
+        page.pdf(path=out_path, format="A4", print_background=True,
+                 prefer_css_page_size=True)
+        return out_path
+    finally:
+        page.close()
+        context.close()
+
+
+def render_html_pdf(template_name: str, out_path: str, **ctx) -> str:
+    """Render a Jinja2 template to a PDF page. Runs on the dedicated render
+    thread (single Chromium process reused across all renders)."""
+    return _call_render(_render_inline, template_name, out_path, False, **ctx)
+
+
+def render_html_pdf_bytes(template_name: str, **ctx) -> bytes:
+    """Like render_html_pdf but returns raw PDF bytes (no temp file needed).
+    Used by single-pass assembly to avoid writing+reading a temp file."""
+    return _call_render(_render_inline, template_name, None, True, **ctx)
 
 
 def resolve_fonts():
@@ -109,41 +197,6 @@ def resolve_fonts():
     return reg, bold
 
 
-def render_html_pdf(template_name: str, out_path: str, **ctx) -> str:
-    """Render a Jinja2 template to a PDF page using the persistent Chromium
-    singleton. Only a new page+context is created per call; the browser
-    process stays alive for the entire app lifetime."""
-    html = _env().get_template(template_name).render(**ctx)
-    browser = _ensure_browser()
-    context = browser.new_context()
-    page = context.new_page()
-    try:
-        page.set_content(html, wait_until="load")
-        page.pdf(path=out_path, format="A4", print_background=True,
-                 prefer_css_page_size=True)
-    finally:
-        page.close()
-        context.close()
-    return out_path
-
-
-def render_html_pdf_bytes(template_name: str, **ctx) -> bytes:
-    """Like render_html_pdf but returns raw PDF bytes (no temp file needed).
-    Used by single-pass assembly to avoid writing+reading a temp file."""
-    html = _env().get_template(template_name).render(**ctx)
-    browser = _ensure_browser()
-    context = browser.new_context()
-    page = context.new_page()
-    try:
-        page.set_content(html, wait_until="load")
-        pdf_bytes = page.pdf(format="A4", print_background=True,
-                             prefer_css_page_size=True)
-    finally:
-        page.close()
-        context.close()
-    return pdf_bytes
-
-
 def _compress_image(img_bytes: bytes) -> bytes:
     """Force in-memory JPEG compression at 75% quality to slash embedded image
     size by ~95% vs lossless PNG. Handles RGBA/P-mode images by converting to
@@ -159,6 +212,22 @@ def _compress_image(img_bytes: bytes) -> bytes:
             return out_io.getvalue()
     except Exception:
         return img_bytes
+
+
+def _compress_image_cached(img_bytes: bytes, img_path: str, cache: dict) -> bytes:
+    """Compress with a per-build dictionary cache keyed by file path (PERF-002).
+
+    The same cropped image can be processed more than once during one assembly
+    (stacking / fit embedding). Reusing the compressed bytes avoids repeatedly
+    running the JPEG encoder on identical data. If `cache` is None the original
+    (uncached) behaviour is preserved."""
+    if cache is None:
+        return _compress_image(img_bytes)
+    cached = cache.get(img_path)
+    if cached is None:
+        cached = _compress_image(img_bytes)
+        cache[img_path] = cached
+    return cached
 
 
 def new_a4(doc: fitz.Document) -> fitz.Page:
@@ -240,7 +309,7 @@ def get_image_fit_size(img_path: str, top: float = IMAGE_TOP,
 
 
 def embed_image_fit(page: fitz.Page, img_path: str, top: float = IMAGE_TOP,
-                    bottom: float = IMAGE_BOTTOM) -> float:
+                    bottom: float = IMAGE_BOTTOM, cache: dict = None) -> float:
     """Insert a single cropped image with a TIGHT, TOP-ANCHORED rectangle.
 
     PyMuPDF never auto-centers (no keep_proportion) — the image fills the tight
@@ -250,7 +319,7 @@ def embed_image_fit(page: fitz.Page, img_path: str, top: float = IMAGE_TOP,
         return top
     with open(img_path, "rb") as f:
         raw_bytes = f.read()
-    img_bytes = _compress_image(raw_bytes)
+    img_bytes = _compress_image_cached(raw_bytes, img_path, cache)
     tight_rect = fitz.Rect(IMAGE_X0, top, IMAGE_X0 + final_w, top + final_h)
     page.insert_image(tight_rect, stream=img_bytes)
     return top + final_h
@@ -258,7 +327,8 @@ def embed_image_fit(page: fitz.Page, img_path: str, top: float = IMAGE_TOP,
 
 def stack_images(doc: fitz.Document, page: fitz.Page, img_paths,
                  top: float = IMAGE_TOP, bottom: float = IMAGE_BOTTOM,
-                 padding: float = STACK_PADDING):
+                 padding: float = STACK_PADDING, cache: dict = None,
+                 max_w_override: float = None):
     """PHASE 8 MAX-WIDTH-FIRST STACKING with SMART PAGINATION.
 
     Rewritten from the old window-ratio fit (which could SQUASH an image into
@@ -271,9 +341,13 @@ def stack_images(doc: fitz.Document, page: fitz.Page, img_paths,
            (guard: never break when already at the top of a fresh page).
         4. Top-anchored, keep_proportion, at 85.04 with 20pt padding after.
 
+    AUDIT-25 (Req 3): `max_w_override` lets callers widen the stacking box
+    (e.g. answer-key rubrics expanding to a 0.5cm right margin). Falls back to
+    the standard printable width when None.
+
     Returns (last_page, current_y) where current_y is the Y right after the
     last placed image (image bottom + padding)."""
-    max_w = IMAGE_RIGHT - IMAGE_X0                 # 453.55
+    max_w = max_w_override or (IMAGE_RIGHT - IMAGE_X0)   # 453.55 default
     max_h_full_page = IMAGE_BOTTOM - IMAGE_TOP     # 723.31
     current_y = top
     for img_path in img_paths:
@@ -281,7 +355,7 @@ def stack_images(doc: fitz.Document, page: fitz.Page, img_paths,
             continue
         with open(img_path, "rb") as f:
             raw_bytes = f.read()
-        img_bytes = _compress_image(raw_bytes)
+        img_bytes = _compress_image_cached(raw_bytes, img_path, cache)
         pix = fitz.Pixmap(img_bytes)
         img_w, img_h = pix.width, pix.height
         pix = None                                 # free memory
@@ -341,27 +415,47 @@ def add_answer_key_footer(page: fitz.Page, ma_de: str, page_no: int, total_pages
     page.insert_text((PAGE_W / 2 - w / 2, FOOTER_Y), txt, fontname=fn, fontsize=fs)
 
 
-def _insert_html_page(doc: fitz.Document, tmpdir: str, template_name: str,
-                      out_index: int, **ctx) -> fitz.Page:
-    """Render HTML via Playwright and append its (single) page into `doc`."""
-    p_path = os.path.join(tmpdir, f"page_{out_index}.pdf")
-    render_html_pdf(template_name, p_path, **ctx)
-    src = fitz.open(p_path)
-    doc.insert_pdf(src)
-    count = src.page_count
-    src.close()
+def _render_html_src(template_name: str, out_index: int, **ctx) -> fitz.Document:
+    """Render an HTML template to a fully in-memory source document.
+
+    No temp file is written — the Playwright render returns raw bytes which are
+    opened via fitz.open(stream=...) (Phase 19 removes the unused tmpdir disk
+    I/O; byte-for-byte identical to the old write-then-read path). The caller
+    keeps this document open until AFTER the final save (Phase 13.1)."""
+    p_bytes = render_html_pdf_bytes(template_name, **ctx)
+    return fitz.open(stream=p_bytes, filetype="pdf")
+
+
+def _insert_html_page(doc: fitz.Document, template_name: str,
+                      out_index: int, srcs: list = None, **ctx) -> fitz.Page:
+    """Render HTML via Playwright and append its (single) page into `doc`.
+
+    If `srcs` (a list) is provided the source document is appended to it so the
+    caller can close it AFTER `doc` has been saved — preventing stream
+    corruption from a premature `close()` (Phase 13.1). Otherwise the source is
+    closed immediately (legacy callers)."""
+    src = _render_html_src(template_name, out_index, **ctx)
+    if srcs is not None:
+        srcs.append(src)
+    try:
+        doc.insert_pdf(src)
+    except Exception:
+        if srcs is None:
+            src.close()
+        raise
+    if srcs is None:
+        src.close()
     return doc[doc.page_count - 1]
 
 
-def _insert_html_then_overlay(doc: fitz.Document, tmpdir: str, template_name: str,
+def _insert_html_then_overlay(doc: fitz.Document, template_name: str,
                               img_path: str, overlay_rect, **ctx) -> fitz.Page:
-    page = _insert_html_page(doc, tmpdir, template_name, doc.page_count + 1, **ctx)
+    page = _insert_html_page(doc, template_name, doc.page_count + 1, **ctx)
     embed_image_centered(page, img_path, overlay_rect)
     return page
 
 
-def _replace_first_page(doc: fitz.Document, tmpdir: str, template_name: str,
-                        **ctx) -> None:
+def _replace_first_page(doc: fitz.Document, template_name: str, **ctx) -> None:
     """PASS-2 helper: re-render a single-page HTML template and swap it in as
     the document's first page.
 
@@ -369,9 +463,7 @@ def _replace_first_page(doc: fitz.Document, tmpdir: str, template_name: str,
     page count, which is only known AFTER all images are stacked and the
     document structure is final — so we render page 1 twice (placeholder,
     then re-render with the real count)."""
-    p_path = os.path.join(tmpdir, "page_1_pass2.pdf")
-    render_html_pdf(template_name, p_path, **ctx)
-    src = fitz.open(p_path)
+    src = _render_html_src(template_name, 0, **ctx)
     try:
         if doc.page_count:
             doc.delete_page(0)
@@ -383,24 +475,54 @@ def _replace_first_page(doc: fitz.Document, tmpdir: str, template_name: str,
 # ---------------------------------------------------------------------------
 # Assembly
 # ---------------------------------------------------------------------------
-def build_exam_pdf(selection, ma_de: str, ngay_thi: str, out_path: str) -> str:
+def build_exam_pdf(selection, ma_de: str, ngay_thi: str, out_path: str,
+                   compression_cache: dict = None) -> str:
     """Assemble the 4-page exam PDF in a SINGLE Playwright render.
 
     Strategy: build all image-only pages first (Word/Excel/PPT previews + end
     marker) into a temp document to determine the final page count, then
     render the instruction page (exam_p1.html) exactly ONCE with the correct
-    total_pages, and merge."""
+    total_pages, and merge.
+
+    Phase 13.1 lifecycle: img_doc and p1_doc stay OPEN until AFTER
+    doc.save() completes — closing a source document before the main save can
+    drop its internal stream references and render images as blue/blank boxes.
+    """
     reg_f, bold_f = resolve_fonts()
-    tmpdir = tempfile.mkdtemp(prefix="pdfgen_exam_")
+    img_doc = fitz.open()       # source doc — closed ONLY after final save
+    doc = fitz.open()           # final container doc
+    p1_doc = None               # source doc — closed ONLY after final save
+    cache = compression_cache if compression_cache is not None else {}  # PERF-002
     try:
         # ---- Pass 1: image pages only (no HTML renders) ----
-        img_doc = fitz.open()
         last_page = None
         current_y = IMAGE_TOP
         for cat in ("word", "excel", "ppt"):
             page = new_a4(img_doc)
             previews = list_section_images(selection[cat]["dir"], "preview")
-            last_page, current_y = stack_images(img_doc, page, previews)
+            last_page, current_y = stack_images(img_doc, page, previews, cache=cache)
+
+            # AUDIT-27 (Req 1): inject the exam-scope "LƯU Ý" note immediately
+            # below the Word section's preview images.  Use insert_htmlbox to
+            # support <b>, <u>, and <li> formatting (plain insert_textbox
+            # cannot render rich text).
+            if cat == "word":
+                note_html = (
+                    '<p style="margin:0; font-size:11pt;">'
+                    '<b><u>Lưu ý:</u></b>'
+                    '</p>'
+                    '<ul style="margin:4pt 0 0 0; padding-left:18pt; font-size:11pt;">'
+                    '<li>Thí sinh làm bài trên 1 trang A4, font chữ Times New Roman, cỡ chữ 13.</li>'
+                    '<li>Lề giấy trên, dưới, phải: 1,5cm; trái: 3cm</li>'
+                    '</ul>'
+                )
+                note_y = current_y + 24.0
+                note_rect = fitz.Rect(MARGIN_LEFT, note_y, IMAGE_RIGHT, note_y + 80)
+                last_page.insert_htmlbox(
+                    note_rect,
+                    note_html,
+                    css="body { font-family: tiro; font-size: 11pt; color: black; text-align: left; }",
+                )
 
         _add_exam_end_marker(img_doc, last_page, reg_f, bold_f, top_y=current_y)
 
@@ -413,23 +535,23 @@ def build_exam_pdf(selection, ma_de: str, ngay_thi: str, out_path: str) -> str:
         p1_doc = fitz.open(stream=p1_pdf, filetype="pdf")
 
         # ---- Merge: instruction page + image pages ----
-        doc = fitz.open()
         doc.insert_pdf(p1_doc)
-        p1_doc.close()
         doc.insert_pdf(img_doc)
-        img_doc.close()
+
+        # Delayed footer injection (document structure is final)
+        total_pages = doc.page_count
+        for i, page in enumerate(doc, start=1):
+            add_exam_footer(page, ma_de, i, total_pages, reg_f, bold_f)
+
+        # Save the MAIN document FIRST — sources may only close afterwards.
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        doc.save(out_path, garbage=3, deflate=True)
+        return out_path
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    # Delayed footer injection (document structure is final)
-    total_pages = doc.page_count
-    for i, page in enumerate(doc, start=1):
-        add_exam_footer(page, ma_de, i, total_pages, reg_f, bold_f)
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    doc.save(out_path, garbage=3, deflate=True)
-    doc.close()
-    return out_path
+        if p1_doc is not None:
+            p1_doc.close()
+        img_doc.close()
+        doc.close()
 
 
 def _add_exam_end_marker(doc: fitz.Document, page: fitz.Page, reg_f: str,
@@ -467,79 +589,122 @@ def _add_exam_end_marker(doc: fitz.Document, page: fitz.Page, reg_f: str,
     page.insert_text((PAGE_W / 2 - w2 / 2, note_y), note, fontname=rfn, fontsize=fs2, color=(0, 0, 0))
 
 
-def build_answer_key_pdf(selection, ma_de: str, can_bo_ra_de: str, out_path: str, ngay_thi: str = "") -> str:
+def build_answer_key_pdf(selection, ma_de: str, can_bo_ra_de: str, out_path: str,
+                         ngay_thi: str = "", compression_cache: dict = None) -> str:
+    """Assemble the answer-key PDF.
+
+    Phase 13.1 lifecycle: every Playwright-rendered source document (the
+    answer_key_p1 and answer_key_p4 pages) stays OPEN until AFTER doc.save()
+    completes so no internal image/stream references are dropped early."""
+    # AUDIT-26 (Req 2): explicitly format the date before rendering so the
+    # answer key header always shows DD/MM/YYYY regardless of input format.
+    ngay_thi = format_ngay_thi(ngay_thi) if ngay_thi else ""
     reg_f, bold_f = resolve_fonts()
-    doc = fitz.open()
-    tmpdir = tempfile.mkdtemp(prefix="pdfgen_ak_")
+    doc = fitz.open()           # final container doc
+    html_sources = []           # source docs — closed ONLY after final save
+    cache = compression_cache if compression_cache is not None else {}  # PERF-002
     try:
         # Page 1: exact HTML header + fixed Windows rubric table (Phase 6).
         _insert_html_page(
-            doc, tmpdir, "answer_key_p1.html", doc.page_count + 1,
-            ma_de=ma_de, ngay_thi=ngay_thi,
+            doc, "answer_key_p1.html", doc.page_count + 1,
+            html_sources, ma_de=ma_de, ngay_thi=ngay_thi,
         )
 
-        # PHASE 7 (Req 2): the rubric table ends around y=350, so CONTINUE
-        # stacking rubric crops on the SAME page from y=400 instead of forcing
-        # a fresh page (removes the massive white gap). Strict order:
-        # word_rubric -> excel_rubric -> ppt_rubric, tight bounding box for
-        # EVERY image, smart page breaks (reset Y to 56.69 on overflow).
+        # AUDIT-27 (Req 3): measure the rendered HTML page so rubrics start
+        # exactly where the fixed Windows rubric table ends.  Filter out
+        # invisible page-level bounding boxes so only real content drives Y.
+        html_page = doc[0]
+        blocks = html_page.get_text("blocks")
+
+        CONTENT_TOP = 56.69
+        FOOTER_ZONE = PAGE_H - 80
+        visible_blocks = [
+            b for b in blocks
+            if b[3] < FOOTER_ZONE and b[1] >= CONTENT_TOP - 10 and b[4].strip()
+        ]
+
+        if visible_blocks:
+            content_bottom_y = max(b[3] for b in visible_blocks)
+        else:
+            content_bottom_y = 380.0
+
+        # Clamp strictly so rubrics never force a jump to page 2 initially.
+        current_y = min(content_bottom_y + 20.0, 500.0)
         current_page = doc[0]
-        current_y = 400.0
+
+        # Strict order: word_rubric -> excel_rubric -> ppt_rubric, tight
+        # bounding box for EVERY image, smart page breaks (reset Y to 56.69 on
+        # overflow).
+        # AUDIT-25 (Req 3): rubrics expand to 0.5cm right margin (tighter layout).
+        RUBRIC_RIGHT = PAGE_W - 28.35      # 0.5cm right margin
         for cat in ("word", "excel", "ppt"):
             rubrics = list_section_images(selection[cat]["dir"], "rubric")
             current_page, current_y = stack_images(doc, current_page, rubrics,
-                                                   top=current_y)
+                                                   top=current_y, padding=8.0,
+                                                   cache=cache,
+                                                   max_w_override=RUBRIC_RIGHT - IMAGE_X0)
 
         # PHASE 7 (Req 4): signature below the last rubric, >=80pt guaranteed.
         current_page, current_y = _add_answer_key_signature(
-            doc, current_page, can_bo_ra_de, reg_f, top_y=current_y)
+            doc, current_page, can_bo_ra_de, reg_f, bold_f, top_y=current_y)
 
         # PHASE 7 (Req 1+3): cleaned Appendix (title ONLY — zero instructions),
         # word preview image(s) inserted directly below the title at y=120,
         # tight bounding box, maximized within the printable box.
-        _insert_html_page(doc, tmpdir, "answer_key_p4.html", doc.page_count + 1)
+        _insert_html_page(doc, "answer_key_p4.html", doc.page_count + 1,
+                          html_sources)
         appendix_page = doc[doc.page_count - 1]
         word_previews = list_section_images(selection["word"]["dir"], "preview")
         if word_previews:
-            stack_images(doc, appendix_page, word_previews, top=120.0)
+            stack_images(doc, appendix_page, word_previews, top=120.0, cache=cache)
+
+        # DELAYED footer injection: document structure is final at this point.
+        total_pages = doc.page_count
+        for i, page in enumerate(doc, start=1):
+            add_answer_key_footer(page, ma_de, i, total_pages, reg_f, bold_f)
+
+        # Save the MAIN document FIRST — sources may only close afterwards.
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        doc.save(out_path, garbage=3, deflate=True)
+        return out_path
     finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    # DELAYED footer injection: document structure is final at this point.
-    total_pages = doc.page_count
-    for i, page in enumerate(doc, start=1):
-        add_answer_key_footer(page, ma_de, i, total_pages, reg_f, bold_f)
-
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    doc.save(out_path, garbage=3, deflate=True)
-    doc.close()
-    return out_path
+        for src in html_sources:
+            src.close()
+        doc.close()
 
 
 def _add_answer_key_signature(doc: fitz.Document, page: fitz.Page, can_bo_ra_de: str,
-                              reg_f: str, top_y: float):
-    """PHASE 7 (Req 4): signature block after the last rubric image.
+                              reg_f: str, bold_f: str, top_y: float):
+    """PHASE 7 (Req 4) + AUDIT-27 (Req 4): signature block after the last
+    rubric image.  110pt signing gap, name in regular weight.
 
-    Guarantees at least 80pt of free space below the content (a fresh page is
-    created otherwise), then draws the signature at 13pt Times New Roman:
+    Layout guarantee: at least 180pt free space below `top_y`, otherwise a
+    fresh page is created.
 
-        (350, top_y + 40)   -> "Cán bộ ra đáp án"
-        (350, top_y + 100)  -> {can_bo_ra_de}
+        (350, top_y + 50)    -> "Cán bộ ra đáp án"  (regular)
+        (350, top_y + 160)   -> {can_bo_ra_de}       (regular, 110pt gap)
     """
-    # The 80pt minimum check; the name line at +40+60 actually needs 100pt,
-    # so the stricter bound guarantees nothing clips the bottom margin.
-    if top_y + 100.0 > IMAGE_BOTTOM:
+    # AUDIT-27 Req 4: 180pt = 50 (label) + 110 (signing gap) + 20 (trailing)
+    # so the physical signature never clips the bottom margin.
+    if top_y + 180.0 > IMAGE_BOTTOM:
         page = new_a4(doc)
         top_y = IMAGE_TOP
+
     rfn = _register_font(page, reg_f, "tnr")
     fs = 13
-    sig_y = top_y + 40.0
-    page.insert_text((350.0, sig_y), "C\u00e1n b\u1ed9 ra \u0111\u00e1p \u00e1n",
+
+    label_y = top_y + 50.0
+    page.insert_text((350.0, label_y), "C\u00e1n b\u1ed9 ra \u0111\u00e1p \u00e1n",
                      fontname=rfn, fontsize=fs, color=(0, 0, 0))
+
     if can_bo_ra_de:
-        page.insert_text((350.0, sig_y + 60.0), can_bo_ra_de,
+        # AUDIT-27 Req 4: name uses regular font (rfn) for visual consistency
+        # with the label, at an expanded 110pt physical signing gap.
+        name_y = label_y + 110.0
+        page.insert_text((350.0, name_y), can_bo_ra_de,
                          fontname=rfn, fontsize=fs, color=(0, 0, 0))
-    return page, sig_y + 60.0
+        return page, name_y + 20.0
+    return page, label_y + 20.0
 
 
 def list_section_images(cat_dir: str, prefix: str) -> List[str]:

@@ -2,8 +2,26 @@ import { ref } from 'vue'
 
 const API_BASE = '/api'
 
+const FETCH_TIMEOUT_MS = 180000 // 180s (AUDIT-24 CV-3): slow networks must
+// time out with a clear message instead of hanging the UI forever.
+
+async function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      throw new Error('Request timed out — please retry')
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function request(url, options = {}) {
-  const res = await fetch(`${API_BASE}${url}`, {
+  const res = await fetchWithTimeout(`${API_BASE}${url}`, {
     headers: { ...options.headers },
     ...options,
   })
@@ -66,6 +84,10 @@ export function useApi() {
     return request('/modules')
   }
 
+  async function fetchModuleDetail(moduleId) {
+    return request(`/modules/${encodeURIComponent(moduleId)}`)
+  }
+
   async function deleteModule(moduleId) {
     loading.value = true
     error.value = null
@@ -97,7 +119,7 @@ export function useApi() {
   }
 
   async function fetchBlob(url) {
-    const res = await fetch(url)
+    const res = await fetchWithTimeout(url)
     if (!res.ok) throw new Error('Failed to load preview')
     return res.blob()
   }
@@ -106,7 +128,7 @@ export function useApi() {
     loading.value = true
     error.value = null
     try {
-      const res = await fetch(`${API_BASE}/generate/download`, {
+      const res = await fetchWithTimeout(`${API_BASE}/generate/download`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -142,6 +164,7 @@ export function useApi() {
     ingestModule,
     fetchModulePages,
     fetchModules,
+    fetchModuleDetail,
     deleteModule,
     generatePreview,
     generateDownload,

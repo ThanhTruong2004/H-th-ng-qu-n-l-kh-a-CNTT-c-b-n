@@ -140,10 +140,15 @@
       </div>
     </form>
 
-    <!-- CROPPER MODAL (multi-crop: several crops per section supported) -->
-    <div v-if="showCropper" class="fixed inset-0 z-50 flex items-center justify-center p-2" @click.self="cancelCrop">
-      <div class="card w-full max-w-[90vw] h-[85vh] p-4 sm:p-6 flex flex-col overflow-hidden">
-        <div class="flex items-center justify-between mb-3 shrink-0 flex-wrap gap-2">
+    <!-- CROPPER MODAL (multi-crop: several crops per section supported) —
+         Teleported to <body> so it escapes the panel stacking context and the
+         header (z-50) can never bleed through it (Phase 19). -->
+    <Teleport to="body">
+      <div v-if="showCropper" class="fixed inset-0 z-[100] flex items-center justify-center p-1" @click.self="cancelCrop">
+      <div ref="cropperCardRef"
+           class="card w-full max-w-[96vw] h-[94vh] p-3 sm:p-4 flex flex-col overflow-hidden"
+           :class="fsFallback ? '!w-full !h-[100vh] !max-w-none !rounded-none' : ''">
+        <div class="flex items-center justify-between mb-1.5 shrink-0 flex-wrap gap-2">
           <p class="font-display font-bold text-ink-primary">{{ activeSlot.label }}
             <span class="ml-2 badge bg-pine-500/15 text-ink-primary ring-1 ring-pine-400/40">{{ (crops[activeSlot.key] || []).length }} vùng đã cắt</span>
           </p>
@@ -153,15 +158,19 @@
             <span class="text-xs text-ink-tertiary font-semibold">Trang {{ groupPage + 1 }} / {{ groupPages.length }}</span>
             <button type="button" class="px-3 py-1.5 rounded-pill text-xs font-semibold bg-white/10 border border-glass-borderStrong text-ink-secondary backdrop-blur-md hover:bg-white/40 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-300"
                     @click="changeGroupPage(1)" :disabled="groupPage >= groupPages.length - 1">Trang sau &#8594;</button>
+            <button type="button" class="text-ink-tertiary hover:text-ink-primary transition-colors" :title="isFullscreen ? 'Thoát toàn màn hình (Esc)' : 'Toàn màn hình'" @click="toggleFullscreen">
+              <svg v-if="!isFullscreen" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+              <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
+            </button>
             <button type="button" class="text-ink-tertiary hover:text-semantic-error transition-colors" @click="cancelCrop">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
             </button>
           </div>
         </div>
-        <div class="rounded-xl overflow-hidden bg-black/30 flex-1 min-h-0 flex items-center justify-center">
+        <div class="rounded-lg overflow-hidden bg-black/30 flex-1 min-h-0 flex items-center justify-center">
           <img ref="cropImgRef" :src="cropSrc" class="h-full w-full object-contain" />
         </div>
-        <div class="flex items-center justify-between mt-4 shrink-0 flex-wrap gap-2">
+        <div class="flex items-center justify-between mt-2 shrink-0 flex-wrap gap-2">
           <button type="button" class="text-xs font-medium text-ink-tertiary hover:text-ink-primary transition-colors" @click="resetCrop">Hoàn tác (reset khung)</button>
           <div class="flex items-center gap-2">
             <button type="button" class="btn-pill-outline" @click="cancelCrop">Huỷ</button>
@@ -171,15 +180,20 @@
         </div>
       </div>
     </div>
+  </Teleport>
   </div>
-  <div v-if="isProcessing" class="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm">
-    <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-emerald-500 mb-4"></div>
-    <p class="text-white text-lg font-medium shadow-sm">{{ processingMessage }}</p>
-  </div>
+  <!-- Blocking loader — Teleported to <body>, z-200 blocks absolutely
+       everything (header, modals, etc.). -->
+  <Teleport to="body">
+    <div v-if="isProcessing" class="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-emerald-500 mb-4"></div>
+      <p class="text-white text-lg font-medium shadow-sm">{{ processingMessage }}</p>
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
-import { reactive, ref, computed, nextTick } from 'vue'
+import { reactive, ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import Cropper from 'cropperjs'
 import 'cropperjs/dist/cropper.css'
 import { useApi } from '../api.js'
@@ -193,8 +207,8 @@ const dragOver = reactive({ exam: false, answer: false, wordAssets: false, excel
 const inputEls = reactive({})
 
 const fileSlots = [
-  { type: 'exam', title: 'Đề thi gốc (PDF)', hint: '4 trang, định dạng .pdf', accept: '.pdf' },
-  { type: 'answer', title: 'Đáp án gốc (PDF)', hint: '4 trang, định dạng .pdf', accept: '.pdf' },
+  { type: 'exam', title: 'Đề thi gốc (PDF/Word)', hint: '4 trang, định dạng .pdf/.doc/.docx', accept: '.pdf,.doc,.docx' },
+  { type: 'answer', title: 'Đáp án gốc (PDF/Word)', hint: '4 trang, định dạng .pdf/.doc/.docx', accept: '.pdf,.doc,.docx' },
   { type: 'excel', title: 'Excel gốc', hint: 'Định dạng .xlsx', accept: '.xlsx,.xls' },
   { type: 'ppt', title: 'PowerPoint gốc', hint: 'Định dạng .pptx', accept: '.pptx' },
   { type: 'wordAssets', title: 'Ảnh Word Assets', hint: 'Hình ảnh (.png, .jpg, .webp) — tùy chọn, chọn nhiều', accept: 'image/png,image/jpeg,image/webp,image/bmp' },
@@ -216,8 +230,9 @@ const cropSlots = [
   { key: 'ppt_rubric', label: 'PPT Rubric', group: 'answer' },
 ]
 
-// MULTI-CROP: each section now holds an ARRAY of cropped images (data URLs),
-// supporting real-world content that spills across multiple pages.
+// MULTI-CROP: each section now holds an ARRAY of cropped images (blob object
+// URLs — AUDIT-24 ST-5), supporting real-world content that spills across
+// multiple pages while keeping JS memory footprint tiny.
 const crops = reactive({})
 for (const s of cropSlots) crops[s.key] = []
 
@@ -255,6 +270,12 @@ function clearSlot(type) {
 }
 
 function resetCrops() {
+  // AUDIT-24 ST-5: revoke every stored blob object URL before clearing.
+  for (const s of cropSlots) {
+    for (const u of crops[s.key] || []) {
+      if (u && u.startsWith('blob:')) URL.revokeObjectURL(u)
+    }
+  }
   pagesLoaded.value = false
   pagesImages.exam = []
   pagesImages.answer = []
@@ -294,7 +315,36 @@ const activeSlot = ref(null)
 const groupPage = ref(0)
 const cropSrc = ref('')
 const cropImgRef = ref(null)
+const cropperCardRef = ref(null)
+const isFullscreen = ref(false)
+const fsFallback = ref(false)
 let cropper = null
+
+// Near-fullscreen cropper (Phase 18 Req 1): explicit fullscreen toggle via the
+// Fullscreen API, falling back to CSS classes if the API is unavailable.
+function toggleFullscreen() {
+  const el = cropperCardRef.value
+  if (!el) return
+  if (document.fullscreenElement === el) {
+    document.exitFullscreen().catch(() => {})
+    return
+  }
+  const req = el.requestFullscreen || el.webkitRequestFullscreen
+  if (typeof req === 'function') {
+    try {
+      req.call(el)
+      return
+    } catch { /* fall through to CSS fallback */ }
+  }
+  fsFallback.value = !fsFallback.value
+}
+
+function onFsChange() {
+  isFullscreen.value = !!document.fullscreenElement
+}
+
+onMounted(() => document.addEventListener('fullscreenchange', onFsChange))
+onUnmounted(() => document.removeEventListener('fullscreenchange', onFsChange))
 
 const groupPages = computed(() => {
   const slot = activeSlot.value
@@ -353,7 +403,9 @@ function saveCrop(close = true) {
     imageSmoothingQuality: 'high',
   })
   if (!base) return
-  const scale = 4
+  // AUDIT-24 ST-1/ST-5: 2x upscale (was 4x) keeps slow laptops' main thread
+  // responsive during encode; thumbnails/PDF overlay don't need 4x detail.
+  const scale = 2
   const canvas = document.createElement('canvas')
   canvas.width = base.width * scale
   canvas.height = base.height * scale
@@ -363,22 +415,22 @@ function saveCrop(close = true) {
   ctx.drawImage(base, 0, 0, canvas.width, canvas.height)
   canvas.toBlob((blob) => {
     if (!blob) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      // MULTI-CROP: push into the ARRAY (several crops per section allowed).
-      const key = activeSlot.value.key
-      const list = crops[key] || []
-      list.push(reader.result)
-      crops[key] = list
-      if (close) {
-        closeCropper()
-      } else {
-        // Keep the modal open so the user can crop the next spill-over
-        // region on the same (or a neighbouring) page.
-        nextTick(mountCropper)
-      }
+    // AUDIT-24 ST-5: store an OBJECT URL instead of a Base64 string — the
+    // browser keeps the decoded pixels on disk/GPU, not duplicated as a ~33%
+    // larger ASCII string in JS memory. Cuts crop memory by ~10x.
+    const objectUrl = URL.createObjectURL(blob)
+    // MULTI-CROP: push into the ARRAY (several crops per section allowed).
+    const key = activeSlot.value.key
+    const list = crops[key] || []
+    list.push(objectUrl)
+    crops[key] = list
+    if (close) {
+      closeCropper()
+    } else {
+      // Keep the modal open so the user can crop the next spill-over
+      // region on the same (or a neighbouring) page.
+      nextTick(mountCropper)
     }
-    reader.readAsDataURL(blob)
   }, 'image/jpeg', 0.9)
 }
 
@@ -394,12 +446,26 @@ function closeCropper() {
 
 function removeCrop(slot, index) {
   if (!Array.isArray(crops[slot.key])) return
-  crops[slot.key].splice(index, 1)
+  const removed = crops[slot.key].splice(index, 1)
+  // AUDIT-24 ST-5: release the object URL we no longer render.
+  for (const u of removed) {
+    if (u && u.startsWith('blob:')) URL.revokeObjectURL(u)
+  }
+}
+
+// AUDIT-24 LE-1: a real non-empty file with a valid extension is required —
+// guards against 0-byte or mis-typed uploads silently passing the submit.
+function isValidRawFile(f) {
+  if (!f || typeof f.size !== 'number' || !(f.size > 0)) return false
+  const name = (f.name || '').toLowerCase()
+  return /\.(pdf|doc|docx)$/.test(name)
 }
 
 const canSubmit = computed(() =>
   moduleId.value &&
-  files.exam && files.answer && files.excel && files.ppt &&
+  isValidRawFile(files.exam) && isValidRawFile(files.answer) &&
+  files.excel && files.excel.size > 0 &&
+  files.ppt && files.ppt.size > 0 &&
   pagesLoaded.value &&
   cropSlots.every((s) => crops[s.key] && crops[s.key].length > 0)
 )
@@ -410,13 +476,10 @@ const processingMessage = ref('')
 const error = ref('')
 const success = ref('')
 
-function dataURLToFile(dataURL, name) {
-  const parts = dataURL.split(',')
-  const mime = (parts[0].match(/data:(.*?);/) || [])[1] || 'image/png'
-  const bin = atob(parts[1])
-  const arr = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i)
-  return new File([arr], name, { type: mime })
+async function dataURLToFile(dataURL, name) {
+  const res = await fetch(dataURL)
+  const blob = await res.blob()
+  return new File([blob], name, { type: blob.type })
 }
 
 async function handleIngest() {
@@ -434,8 +497,11 @@ async function handleIngest() {
     for (const slot of cropSlots) {
       const dataURLs = crops[slot.key] || []
       // MULTI-CROP: multiple PNG files per field -> backend stacks them.
-      cropFiles[slot.key] = dataURLs.map((dataURL, i) =>
-        dataURLToFile(dataURL, `${slot.key}_${i}.png`))
+      // Use Promise.all to await async dataURLToFile conversions without
+      // blocking the UI (AUDIT-23 Fix 1).
+      cropFiles[slot.key] = await Promise.all(
+        dataURLs.map((dataURL, i) =>
+          dataURLToFile(dataURL, `${slot.key}_${i}.png`)))
       totalCrops += dataURLs.length
     }
     await api.ingestModule(

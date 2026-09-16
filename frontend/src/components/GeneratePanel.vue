@@ -62,20 +62,25 @@
         <div>
           <div class="flex items-center justify-between mb-3">
             <label class="block text-sm font-medium text-ink-primary">Chọn Module</label>
+            <div class="flex items-center gap-3">
+            <span class="text-sm font-medium text-ink-primary">Chế độ:</span>
             <button
               type="button"
-              @click="randomToggle = !randomToggle"
-              :class="[
-                'flex items-center gap-2 px-3.5 py-1.5 rounded-pill text-xs font-semibold transition-all duration-300 ease-in-out',
-                randomToggle
-                  ? 'bg-pine-500/80 text-white shadow-glow scale-[1.03]'
-                  : 'bg-white/10 border border-glass-borderStrong text-ink-secondary backdrop-blur-md hover:bg-white/40'
-              ]"
+              @click="setRandomMode(true)"
+              :class="randomToggle ? 'bg-pine-500 text-white' : 'bg-white/10 text-white/50'"
+              class="px-3.5 py-1.5 rounded-pill text-xs font-semibold transition-all duration-300 ease-in-out hover:bg-pine-400/80"
             >
-              <svg v-if="randomToggle" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
-              <svg v-else width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-              {{ randomToggle ? 'Chọn ngẫu nhiên' : 'Chọn thủ công' }}
+              Ngẫu nhiên
             </button>
+            <button
+              type="button"
+              @click="setRandomMode(false)"
+              :class="!randomToggle ? 'bg-amber-600 text-white' : 'bg-white/10 text-white/50'"
+              class="px-3.5 py-1.5 rounded-pill text-xs font-semibold transition-all duration-300 ease-in-out hover:bg-amber-500/80"
+            >
+              Thủ công
+            </button>
+          </div>
           </div>
 
           <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -150,9 +155,11 @@
       </form>
     </div>
 
-    <!-- Preview Modal -->
-    <transition name="fade">
-      <div v-if="previewOpen" class="fixed inset-0 z-[100] flex items-center justify-center p-2 sm:p-4">
+    <!-- Preview Modal — Teleported to <body> to escape the panel stacking
+         context (header z-50 bleed fix, Phase 19). -->
+    <Teleport to="body">
+      <transition name="fade">
+        <div v-if="previewOpen" class="fixed inset-0 z-[100] flex items-center justify-center p-2 sm:p-4">
         <div class="absolute inset-0 bg-black/70 backdrop-blur-sm" @click="closePreview"></div>
         <div class="relative glass rounded-panel w-full max-w-[95vw] h-[90vh] flex flex-col overflow-hidden">
           <div class="flex items-center justify-between px-6 py-4 border-b border-glass-border">
@@ -188,16 +195,21 @@
           </div>
         </div>
       </div>
-    </transition>
+      </transition>
+    </Teleport>
   </div>
-  <div v-if="isProcessing" class="fixed inset-0 z-[101] flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm">
-    <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-emerald-500 mb-4"></div>
-    <p class="text-white text-lg font-medium shadow-sm">{{ processingMessage }}</p>
-  </div>
+  <!-- Blocking loader — Teleported to <body>, z-200 blocks absolutely
+       everything (header, modals, etc.). -->
+  <Teleport to="body">
+    <div v-if="isProcessing" class="fixed inset-0 z-[200] flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm">
+      <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-emerald-500 mb-4"></div>
+      <p class="text-white text-lg font-medium shadow-sm">{{ processingMessage }}</p>
+    </div>
+  </Teleport>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { useApi } from '../api.js'
 
 const api = useApi()
@@ -214,6 +226,7 @@ const pptModuleId = ref(null)
 const previewOpen = ref(false)
 const examPreviewUrl = ref('')
 const answerPreviewUrl = ref('')
+const generationId = ref('')
 const previewing = ref(false)
 const generating = ref(false)
 const isProcessing = ref(false)
@@ -236,13 +249,25 @@ const canGenerate = computed(() => {
   )
 })
 
-async function fetchModules() {
-  modules.value = await api.fetchModules()
-  if (modules.value.length > 0) {
+function setRandomMode(isRandom) {
+  randomToggle.value = isRandom
+  if (isRandom) {
+    // Random mode: explicitly clear any default IDs so they never leak into
+    // the payload — the backend picks an independent module per category.
+    wordModuleId.value = null
+    excelModuleId.value = null
+    pptModuleId.value = null
+  } else if (modules.value.length > 0) {
+    // Manual mode: fall back to the newest uploaded module by default.
     wordModuleId.value = modules.value[0].id
     excelModuleId.value = modules.value[0].id
     pptModuleId.value = modules.value[0].id
   }
+}
+
+async function fetchModules() {
+  modules.value = await api.fetchModules()
+  setRandomMode(randomToggle.value)
 }
 
 function buildPayload() {
@@ -267,12 +292,10 @@ async function handlePreview() {
   await new Promise(resolve => setTimeout(resolve, 50))
   try {
     const res = await api.generatePreview(buildPayload())
-    const [examBlob, answerBlob] = await Promise.all([
-      api.fetchBlob(res.exam_url),
-      api.fetchBlob(res.answer_key_url),
-    ])
-    examPreviewUrl.value = URL.createObjectURL(examBlob)
-    answerPreviewUrl.value = URL.createObjectURL(answerBlob)
+    generationId.value = res.generation_id || ''
+    // Preview the SAME artifact that will be downloaded (no double generation).
+    examPreviewUrl.value = res.exam_url || ''
+    answerPreviewUrl.value = res.answer_url || ''
     previewOpen.value = true
   } catch (e) {
     error.value = e.message
@@ -283,24 +306,39 @@ async function handlePreview() {
 }
 
 function closePreview() {
-  if (examPreviewUrl.value) URL.revokeObjectURL(examPreviewUrl.value)
-  if (answerPreviewUrl.value) URL.revokeObjectURL(answerPreviewUrl.value)
   examPreviewUrl.value = ''
   answerPreviewUrl.value = ''
   previewOpen.value = false
 }
 
+// Any change to the request inputs invalidates the stored artifact — the user
+// must Preview again before Download so ZIP is always built from fresh PDFs.
+watch(
+  [ngayThi, maDe, canBoRaDe, randomToggle, wordModuleId, excelModuleId, pptModuleId],
+  () => {
+    generationId.value = ''
+    if (previewOpen.value) closePreview()
+  }
+)
+
 async function handleGenerate() {
   if (!canGenerate.value || generating.value) return
   error.value = ''
   success.value = ''
+  if (!generationId.value) {
+    error.value = 'Vui lòng bấm Xem Trước trước để tạo bộ đề, sau đó mới tải ZIP.'
+    return
+  }
   generating.value = true
   isProcessing.value = true
   processingMessage.value = 'Đang đóng gói ZIP...'
   await nextTick()
   await new Promise(resolve => setTimeout(resolve, 50))
   try {
-    await api.generateDownload(buildPayload())
+    await api.generateDownload({
+      generation_id: generationId.value,
+      ma_de: maDe.value.trim(),
+    })
     success.value = `Đã tạo và tải xuống bộ đề mã ${maDe.value.trim()} thành công!`
     setTimeout(() => success.value = '', 3000)
   } catch (e) {
