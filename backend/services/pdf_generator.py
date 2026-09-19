@@ -7,11 +7,13 @@ Playwright Chromium, then stitches the sliced images (Phase 1) with PyMuPDF
 
 import atexit
 import io
+import logging
 import os
 import queue
 import re
 import threading
 import time
+from functools import lru_cache
 from typing import List, Tuple
 
 import fitz
@@ -20,6 +22,8 @@ from jinja2 import Environment, FileSystemLoader
 from playwright.sync_api import sync_playwright
 
 from file_utils import UPLOAD_DIR, format_ngay_thi
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Page geometry (A4 in points)
@@ -241,15 +245,10 @@ def _register_font(page: fitz.Page, fontfile: str, fontname: str) -> str:
     return fontname
 
 
-_text_width_cache = {}
-
-
+@lru_cache(maxsize=256)
 def _text_width(text: str, fontname: str, fontsize: float, fontfile: str) -> float:
     """Measure rendered text width in points using an off-screen page (accurate
     for embedded TTF fonts, which fitz.get_text_length does not support)."""
-    key = (text, fontfile, fontsize)
-    if key in _text_width_cache:
-        return _text_width_cache[key]
     doc = fitz.open()
     try:
         page = doc.new_page(width=2000, height=60)
@@ -259,7 +258,6 @@ def _text_width(text: str, fontname: str, fontsize: float, fontfile: str) -> flo
         w = spans[0]["bbox"][2] - spans[0]["bbox"][0] if spans else 0.0
     finally:
         doc.close()
-    _text_width_cache[key] = w
     return w
 
 
@@ -495,17 +493,30 @@ def build_exam_pdf(selection, ma_de: str, ngay_thi: str, out_path: str,
     cache = compression_cache if compression_cache is not None else {}  # PERF-002
     try:
         # ---- Pass 1: image pages only (no HTML renders) ----
-        last_page = None
+        # PHASE 28: single rolling cursor across all three categories.  A
+        # shared current_page + top=current_y lets stack_images continue
+        # filling the SAME page until overflow (smart pagination) instead of
+        # forcing a fresh page per category—which dropped the PPT section.
+        current_page = new_a4(img_doc)
         current_y = IMAGE_TOP
         for cat in ("word", "excel", "ppt"):
-            page = new_a4(img_doc)
             previews = list_section_images(selection[cat]["dir"], "preview")
-            last_page, current_y = stack_images(img_doc, page, previews, cache=cache)
+
+            # Safety guard: if the user forgot to crop a section, skip it
+            # gracefully but DON'T break the loop (PPT must never be dropped).
+            if not previews:
+                logger.warning("No preview images found for category %s", cat)
+                continue
+
+            current_page, current_y = stack_images(
+                img_doc, current_page, previews, top=current_y, cache=cache)
 
             # AUDIT-27 (Req 1): inject the exam-scope "LƯU Ý" note immediately
             # below the Word section's preview images.  Use insert_htmlbox to
             # support <b>, <u>, and <li> formatting (plain insert_textbox
-            # cannot render rich text).
+            # cannot render rich text).  NOTE: PyMuPDF 1.27 insert_htmlbox
+            # takes styling via `css=` (fontname/fontsize/color/align kwargs
+            # belong to insert_textbox and raise TypeError on htmlbox).
             if cat == "word":
                 note_html = (
                     '<p style="margin:0; font-size:11pt;">'
@@ -518,13 +529,16 @@ def build_exam_pdf(selection, ma_de: str, ngay_thi: str, out_path: str,
                 )
                 note_y = current_y + 24.0
                 note_rect = fitz.Rect(MARGIN_LEFT, note_y, IMAGE_RIGHT, note_y + 80)
-                last_page.insert_htmlbox(
+                current_page.insert_htmlbox(
                     note_rect,
                     note_html,
                     css="body { font-family: tiro; font-size: 11pt; color: black; text-align: left; }",
                 )
+                # PHASE 28 (Req 2) CRITICAL FIX: advance current_y so the next
+                # section (Excel) starts BELOW the note instead of overlapping.
+                current_y = note_y + 90.0
 
-        _add_exam_end_marker(img_doc, last_page, reg_f, bold_f, top_y=current_y)
+        _add_exam_end_marker(img_doc, current_page, reg_f, bold_f, top_y=current_y)
 
         total_pages = 1 + img_doc.page_count   # +1 for instruction page
 

@@ -3,6 +3,8 @@
 > Ứng dụng web tự động lắp ráp bộ đề thi CNTT cơ bản của Trường Đại học Đà Lạt: cắt ảnh minh họa chính xác ngay trên trình duyệt, phân trang PDF động, và đóng gói bộ đề (đề thi + đáp án + bảng tiêu chí chấm điểm) thành một tệp ZIP duy nhất.
 >
 > 🎯 **Mục đích triển khai**: mạng nội bộ / localhost tại phòng máy hoặc phòng thi. Không yêu cầu bảo mật web-facing (Auth/CORS ngoài $192.168… đã bật sẵn).
+>
+> 🛡️ **Nginx lockdown**: `X-Frame-Options: SAMEORIGIN`, CSP đầy đủ (`frame-src`/`object-src`/`connect-src` cho phép `blob:`/`data:`) để vừa chặn clickjacking vừa không làm gãy PDF preview và `fetch(dataUrl)` của cropper.
 
 ---
 
@@ -22,7 +24,7 @@ Bảng dưới được tính toán từ số liệu đo thực tế của hệ 
 - **Backend (Python + FastAPI + uvicorn)**: ~200–300 MB nền thường trực.
 - **Playwright Chromium** (render HTML → PDF): ~300–500 MB khi render, giữ singleton toàn bộ vòng đời tiến trình.
 - **LibreOffice**: mỗi lần chuyển đổi Word → PDF tiêu thụ tới **~800 MB**; hệ thống giới hạn **tối đa 3 tiến trình song song** (`asyncio.Semaphore(3)`), tức cao điểm ~2.4 GB chỉ riêng cho chuyển đổi.
-- **Nginx (frontend)**: ~30 MB.
+- **Nginx (frontend)**: giới hạn container **1 GB** (đủ cho body buffer 50 MB + upstream buffer 128 MB + nội dung tĩnh), backend **4 GB**.
 - → **8 GB là điểm cân bằng vàng**: đủ cho tải cao điểm mà không phải swap. Với 6 GB, một đợt 3 file Word chuyển đổi đồng thời sẽ đẩy hệ thống sát ngưỡng — nên **khuyến nghị 8 GB**.
 
 **⚙️ CPU**
@@ -62,7 +64,7 @@ docker compose up -d
 docker compose ps                                  # trạng thái container
 docker compose logs -f backend                     # theo dõi log backend
 docker compose logs -f frontend                    # theo dõi log frontend
-docker compose restart backend                     # restart backend
+docker compose restart frontend                    # restart frontend (sau khi sửa nginx.conf)
 docker builder prune -f                            # giải phóng build cache (~5GB)
 docker volume ls                                   # xem volume dữ liệu
 ```
@@ -140,6 +142,11 @@ npm run build      # xuất ra frontend\dist\
 - **Chuyển đổi Word → PDF** qua LibreOffice (giới hạn 3 tiến trình song song, tự dọn temp).
 - **Xem trước & tải ZIP** chỉ với một nút bấm; stream ZIP 64KB/chunk + ghi tệp nguyên tử (`.tmp` + `os.replace`) để không bao giờ phơi ra tệp ZIP chưa hoàn chỉnh.
 - **Liệt kê ảnh phóng to (Lightbox)** trong thư viện, hỗ trợ bàn phím (Esc).
+- 🛡️ **Chống đua nạp module (DI-1)**: khóa `threading.Lock` theo từng `module_id` — hai request nạp cùng một module đồng thời trả `409 Conflict`.
+- 🔐 **Xóa an toàn (DI-2)**: xóa thư mục vật lý **trước**, xóa row DB **sau** — nếu xóa file thất bại, row vẫn còn để retry.
+- ⏳ **Giới hạn render PDF (PERF-2)**: `asyncio.Semaphore(2)` — khi 2 tiến trình đang sinh đề, request tiếp theo trả `429 Too Many Requests` thay vì làm nghẽn Chromium.
+- ⚡ **Cache đo chiều rộng chữ (PERF-1)**: `@lru_cache(maxsize=256)` cho `_text_width` thay cho dict vô hạn — chống rò rỉ bộ nhớ khi render nhiều footer/signature.
+- 🖼️ **CSP thân thiện PDF**: `X-Frame-Options: SAMEORIGIN` + CSP cho phép `frame-src`/`object-src`/`connect-src` đến `blob:`/`data:` — PDF preview và `fetch(dataUrl)` của cropper hoạt động bình thường.
 
 ## 🛠 Tech Stack
 
@@ -167,13 +174,13 @@ ITExamManager/
 │   └── templates/                # exam_p1.html, answer_key_p1.html, answer_key_p4.html
 └── frontend/
     ├── Dockerfile                # build bằng Node rồi serve bằng Nginx
-    ├── nginx.conf                # Proxy /api/ → backend:8000 (timeout 300s), opt-in gzip
+    ├── nginx.conf                # Proxy /api/ → backend:8000 (timeout 300s), buffer RAM (body 50M, upstream 128M), security headers (SAMEORIGIN + CSP)
     └── src/
         ├── App.vue               # Layout + điều hướng tab
         ├── api.js                # API client (fetchWithTimeout 180s, AbortController)
         ├── style.css
         └── components/
-            ├── UploadPdfForm.vue # Nạp PDF + cropper 6 vùng ảnh
+            ├── UploadPdfForm.vue # Nạp PDF + cropper 6 vùng ảnh + dataURLToFile async (fetch)
             ├── LibraryPanel.vue  # Thư viện module + Lightbox (Phase 25)
             └── GeneratePanel.vue # Tạo đề / xem trước / tải ZIP
 ```
@@ -184,15 +191,15 @@ ITExamManager/
 |--------|----------|-------|
 | GET | `/api/health` | Kiểm tra sức khỏe |
 | POST | `/api/modules/pages` | Render các trang PDF ra base64 để cắt ảnh |
-| POST | `/api/modules/ingest` | Nạp module (PDF + crops + file nguồn) |
+| POST | `/api/modules/ingest` | Nạp module (PDF + crops + file nguồn) — `409` nếu module đang được nạp đồng thời |
 | GET | `/api/modules` | Danh sách module |
 | GET | `/api/modules/{module_id}` | Chi tiết module (crops + word assets) |
 | GET | `/api/modules/{module_id}/files/{category}/{filename}` | Phục vụ file asset (chống path traversal) |
 | DELETE | `/api/modules/{module_id}` | Xóa module |
-| POST | `/api/generate/preview` | Sinh đề + đáp án (generation artifact) — trả `generation_id` |
+| POST | `/api/generate/preview` | Sinh đề + đáp án (generation artifact) — trả `generation_id`; `429` khi đã có 2 tiến trình đang sinh |
 | GET | `/api/generations/{generation_id}/exam.pdf` | PDF đề thi của artifact |
 | GET | `/api/generations/{generation_id}/answer_key.pdf` | PDF đáp án của artifact |
-| POST | `/api/generate/download` | Đóng gói ZIP từ artifact (không sinh lại PDF) |
+| POST | `/api/generate/download` | Đóng gói ZIP từ artifact (không sinh lại PDF); `429` khi render queue đầy |
 
 ## 💾 Docker Volumes & Dữ liệu
 
@@ -227,8 +234,12 @@ Hệ thống tự làm sạch khi khởi động (và định kỳ):
 ## 🧠 Ghi chú kỹ thuật
 
 - **Chỉ render HTML một lần**: số trang cuối được xác định từ tài liệu ảnh trước, sau đó trang HTML đầu được render duy nhất một lần với `tong_so_trang` đúng.
+- **Con trỏ Y dùng chung (Phase 28)**: `build_exam_pdf` dùng một `current_page` + `current_y` quay vòng cho cả ba phần Word/Excel/PPT — `stack_images` tự xuống trang mới khi hết chỗ; thiếu preview một phần thì bỏ qua bằng `logger.warning` chứ không làm rơi PPT. Lưu ý "LƯU Ý" nhúng qua `insert_htmlbox(css=...)` (PyMuPDF 1.27 không nhận `fontname/fontsize/color` trong htmlbox) và sau đó `current_y = note_y + 90.0` để phần Excel/PPT không chồng lên.
 - **Ép ảnh chuẩn khung**: mọi ảnh crop nhúng vào PDF theo dải bbox cố định (khổ A4), giữ tỷ lệ, top-anchor; signature đáp án có phương án tự động xuống trang mới khi thiếu chỗ.
 - **Ngày thi đa định dạng**: chấp nhận ISO (có/không `T`-time), `DD/MM/YYYY`, `DD-MM-YYYY`; nếu để trống/placeholder (`dd/mm/yyyy`) sẽ xuất `…/…/…` (gạch chấm để viết tay).
+- **Đo chiều rộng chữ có giới hạn**: `@lru_cache(maxsize=256)` cho `_text_width` (thay thế dict phình vô hạn từ Phase 32).
+- **Streaming ZIP không nạp hết vào RAM**: đọc file theo từng khối 64KB và `/api/generate/download` ghi ZIP nguyên tử (`.tmp` → `os.replace`).
+- **Buffer Nginx trong RAM**: `client_body_buffer_size 50M` (payload upload ≤50MB không chạm đĩa) + `proxy_buffers 8 16M`/`proxy_buffer_size 16M` (response API ~4.2MB buffered đầy đủ trong RAM).
 - **Kích thước image**: backend ~**2.41 GB**, frontend ~**0.11 GB** (đo thực tế). Image cài kèm LibreOffice + Chromium; bản `python:3.10-slim` gốc.
 - **Log rotation**: mỗi container giới hạn `10 MB × 3 file`.
 - **CORS**: bật sẵn `allow_origins=["*"]` cho dễ triển khai nội bộ; nếu dùng công khai cần thu hẹp.
@@ -241,6 +252,9 @@ Hệ thống tự làm sạch khi khởi động (và định kỳ):
 | Tải ZIP bị lỗi/giữa chừng | Mạng chậm; hệ thống tự regenerate ZIP — thử tải lại |
 | Render trang PDF chậm | Máy thiếu CPU/RAM — xem bảng cấu hình phần cứng |
 | `Module 'X' already exists` | Mã module trùng — chọn mã khác hoặc xóa trong Library |
+| `Module 'X' is currently being ingested. Please wait.` (409) | Ai đó đang nạp cùng module — chờ xong rồi thử lại |
+| `Server is generating PDFs. Please retry in a moment.` (429) | Đã có 2 lần sinh đề đồng thời — chờ vài giây rồi thử lại |
+| Nginx warning "request body buffered to temp file" | Đã loại bỏ bằng `client_body_buffer_size 50M` — nếu vẫn xuất hiện với payload >50MB, tăng thêm |
 | Docker chiếm nhiều disk | `docker builder prune -f` để giải phóng build cache |
 | Không truy cập được từ máy khác | Kiểm tra firewall mở cổng 8000; truy cập `http://<IP>:8000` |
 

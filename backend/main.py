@@ -16,6 +16,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTa
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
+from threading import Lock
 import fitz
 
 from database import get_db, init_db
@@ -32,13 +33,28 @@ from services.pdf_generator import (
 
 logger = logging.getLogger("uvicorn.error")
 
+# AUDIT-31 DI-1: Per-module_id ingest lock to prevent TOCTOU race conditions.
+_ingest_locks = {}
+_ingest_locks_lock = Lock()
+
+
+def _get_ingest_lock(module_id: str) -> Lock:
+    with _ingest_locks_lock:
+        if module_id not in _ingest_locks:
+            _ingest_locks[module_id] = Lock()
+        return _ingest_locks[module_id]
+
+
+# AUDIT-31 PERF-2: Bound concurrent PDF generation to prevent Chromium overload.
+_gen_semaphore = asyncio.Semaphore(2)
+
 app = FastAPI(title="IT Exam Manager", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:8000", "http://localhost", "http://127.0.0.1", "http://localhost:5173"],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -258,116 +274,123 @@ async def ingest_module(
     if not ppt_raw_file.filename.lower().endswith(".pptx"):
         raise HTTPException(status_code=400, detail="ppt_raw_file must be a .pptx file")
 
-    db = get_db()
+    # AUDIT-31 DI-1: serialize concurrent ingests for the same module_id.
+    lock = _get_ingest_lock(module_id)
+    if not lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=f"Module '{module_id}' is currently being ingested. Please wait.")
     try:
-        existing = db.execute("SELECT id FROM modules WHERE module_id=?", (module_id,)).fetchone()
-        if existing:
-            raise HTTPException(status_code=400, detail=f"module_id '{module_id}' already exists")
-    finally:
-        db.close()
 
-    async def _to_pdf_bytes(upload: UploadFile, field: str) -> tuple:
-        """Read a raw exam/answer upload, converting Word to PDF if needed."""
-        data = await upload.read()
-        fname = upload.filename or f"{field}.pdf"
-        if len(data) == 0:
-            raise HTTPException(status_code=400, detail=f"{field} is empty")
-        if _needs_word_conversion(fname):
-            logger.info("Converting Word %s '%s' -> PDF via LibreOffice", field, fname)
-            try:
-                data = await convert_docx_to_pdf(data, fname)
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Cannot convert {field} Word document to PDF: {e}")
-            save_name = os.path.splitext(fname)[0] + ".pdf"
-        else:
-            save_name = fname
-        return data, save_name
+        db = get_db()
+        try:
+            existing = db.execute("SELECT id FROM modules WHERE module_id=?", (module_id,)).fetchone()
+            if existing:
+                raise HTTPException(status_code=400, detail=f"module_id '{module_id}' already exists")
+        finally:
+            db.close()
 
-    exam_bytes, exam_save_name = await _to_pdf_bytes(exam_raw_pdf, "exam_raw_pdf")
-    answer_bytes, answer_save_name = await _to_pdf_bytes(answer_key_raw_pdf, "answer_key_raw_pdf")
+        async def _to_pdf_bytes(upload: UploadFile, field: str) -> tuple:
+            """Read a raw exam/answer upload, converting Word to PDF if needed."""
+            data = await upload.read()
+            fname = upload.filename or f"{field}.pdf"
+            if len(data) == 0:
+                raise HTTPException(status_code=400, detail=f"{field} is empty")
+            if _needs_word_conversion(fname):
+                logger.info("Converting Word %s '%s' -> PDF via LibreOffice", field, fname)
+                try:
+                    data = await convert_docx_to_pdf(data, fname)
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"Cannot convert {field} Word document to PDF: {e}")
+                save_name = os.path.splitext(fname)[0] + ".pdf"
+            else:
+                save_name = fname
+            return data, save_name
 
-    word_dir = os.path.join(MODULES_DIR, "word", module_id)
-    excel_dir = os.path.join(MODULES_DIR, "excel", module_id)
-    ppt_dir = os.path.join(MODULES_DIR, "ppt", module_id)
-    module_root = os.path.join(MODULES_DIR, module_id)
+        exam_bytes, exam_save_name = await _to_pdf_bytes(exam_raw_pdf, "exam_raw_pdf")
+        answer_bytes, answer_save_name = await _to_pdf_bytes(answer_key_raw_pdf, "answer_key_raw_pdf")
 
-    for d in [word_dir, excel_dir, ppt_dir, module_root]:
-        os.makedirs(d, exist_ok=True)
+        word_dir = os.path.join(MODULES_DIR, "word", module_id)
+        excel_dir = os.path.join(MODULES_DIR, "excel", module_id)
+        ppt_dir = os.path.join(MODULES_DIR, "ppt", module_id)
+        module_root = os.path.join(MODULES_DIR, module_id)
 
-    try:
-        exam_pdf_path = os.path.join(module_root, exam_save_name)
-        await run_in_threadpool(write_file_sync, exam_pdf_path, exam_bytes)
-
-        answer_pdf_path = os.path.join(module_root, answer_save_name)
-        await run_in_threadpool(write_file_sync, answer_pdf_path, answer_bytes)
-
-        excel_bytes = await excel_raw_file.read()
-        excel_path = os.path.join(excel_dir, "dlm_raw.xlsx")
-        await run_in_threadpool(write_file_sync, excel_path, excel_bytes)
-
-        ppt_bytes = await ppt_raw_file.read()
-        ppt_path = os.path.join(ppt_dir, "dlm.pptx")
-        await run_in_threadpool(write_file_sync, ppt_path, ppt_bytes)
-
-        if word_assets:
-            for asset in word_assets:
-                asset_ext = Path(asset.filename).suffix.lower()
-                if asset_ext in ALLOWED_IMAGE_EXTS:
-                    asset_bytes = await asset.read()
-                    asset_path = os.path.join(word_dir, asset.filename)
-                    await run_in_threadpool(write_file_sync, asset_path, asset_bytes)
-
-        # Explicit mapping — no locals() reflection (Logic Bug 11 fix).
-        # (field_name, target_dir, prefix, uploads)
-        crop_slots = [
-            ("word_preview", word_dir, "preview", word_preview),
-            ("excel_preview", excel_dir, "preview", excel_preview),
-            ("ppt_preview", ppt_dir, "preview", ppt_preview),
-            ("word_rubric", word_dir, "rubric", word_rubric),
-            ("excel_rubric", excel_dir, "rubric", excel_rubric),
-            ("ppt_rubric", ppt_dir, "rubric", ppt_rubric),
-        ]
-        for field_name, target_dir, prefix, uploads in crop_slots:
-            uploads = uploads or []
-            for i, upload in enumerate(uploads):
-                if not upload or not upload.filename:
-                    continue
-                if not upload.filename.lower().endswith(".png"):
-                    raise HTTPException(status_code=400, detail=f"{field_name} must be a .png file")
-                crop_bytes = await upload.read()
-                # MULTI-CROP: each additional PNG for the same section gets an
-                # incremented suffix so the PDF engine can stack them in order.
-                save_name = f"{prefix}_{i}.png"
-                await run_in_threadpool(
-                    write_file_sync, os.path.join(target_dir, save_name), crop_bytes)
-
-    except HTTPException:
-        raise
-    except Exception as e:
         for d in [word_dir, excel_dir, ppt_dir, module_root]:
-            if os.path.exists(d):
-                import shutil
-                shutil.rmtree(d, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=f"PDF processing failed: {str(e)}")
+            os.makedirs(d, exist_ok=True)
 
-    db = get_db()
-    try:
-        cursor = db.execute(
-            """INSERT INTO modules (module_id, exam_pdf_path, answer_key_pdf_path)
-               VALUES (?, ?, ?)""",
-            (module_id, exam_pdf_path, answer_pdf_path)
-        )
-        db.commit()
-        return {"id": cursor.lastrowid, "module_id": module_id, "message": f"Module '{module_id}' ingested successfully"}
-    except Exception as e:
-        db.rollback()
-        for d in [word_dir, excel_dir, ppt_dir, module_root]:
-            if os.path.exists(d):
-                import shutil
-                shutil.rmtree(d, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=str(e))
+        try:
+            exam_pdf_path = os.path.join(module_root, exam_save_name)
+            await run_in_threadpool(write_file_sync, exam_pdf_path, exam_bytes)
+
+            answer_pdf_path = os.path.join(module_root, answer_save_name)
+            await run_in_threadpool(write_file_sync, answer_pdf_path, answer_bytes)
+
+            excel_bytes = await excel_raw_file.read()
+            excel_path = os.path.join(excel_dir, "dlm_raw.xlsx")
+            await run_in_threadpool(write_file_sync, excel_path, excel_bytes)
+
+            ppt_bytes = await ppt_raw_file.read()
+            ppt_path = os.path.join(ppt_dir, "dlm.pptx")
+            await run_in_threadpool(write_file_sync, ppt_path, ppt_bytes)
+
+            if word_assets:
+                for asset in word_assets:
+                    asset_ext = Path(asset.filename).suffix.lower()
+                    if asset_ext in ALLOWED_IMAGE_EXTS:
+                        asset_bytes = await asset.read()
+                        asset_path = os.path.join(word_dir, asset.filename)
+                        await run_in_threadpool(write_file_sync, asset_path, asset_bytes)
+
+            # Explicit mapping -- no locals() reflection (Logic Bug 11 fix).
+            # (field_name, target_dir, prefix, uploads)
+            crop_slots = [
+                ("word_preview", word_dir, "preview", word_preview),
+                ("excel_preview", excel_dir, "preview", excel_preview),
+                ("ppt_preview", ppt_dir, "preview", ppt_preview),
+                ("word_rubric", word_dir, "rubric", word_rubric),
+                ("excel_rubric", excel_dir, "rubric", excel_rubric),
+                ("ppt_rubric", ppt_dir, "rubric", ppt_rubric),
+            ]
+            for field_name, target_dir, prefix, uploads in crop_slots:
+                uploads = uploads or []
+                for i, upload in enumerate(uploads):
+                    if not upload or not upload.filename:
+                        continue
+                    if not upload.filename.lower().endswith(".png"):
+                        raise HTTPException(status_code=400, detail=f"{field_name} must be a .png file")
+                    crop_bytes = await upload.read()
+                    # MULTI-CROP: each additional PNG for the same section gets an
+                    # incremented suffix so the PDF engine can stack them in order.
+                    save_name = f"{prefix}_{i}.png"
+                    await run_in_threadpool(
+                        write_file_sync, os.path.join(target_dir, save_name), crop_bytes)
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            for d in [word_dir, excel_dir, ppt_dir, module_root]:
+                if os.path.exists(d):
+                    shutil.rmtree(d, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=f"PDF processing failed: {str(e)}")
+
+        db = get_db()
+        try:
+            cursor = db.execute(
+                """INSERT INTO modules (module_id, exam_pdf_path, answer_key_pdf_path)
+                   VALUES (?, ?, ?)""",
+                (module_id, exam_pdf_path, answer_pdf_path)
+            )
+            db.commit()
+            return {"id": cursor.lastrowid, "module_id": module_id, "message": f"Module '{module_id}' ingested successfully"}
+        except Exception as e:
+            db.rollback()
+            for d in [word_dir, excel_dir, ppt_dir, module_root]:
+                if os.path.exists(d):
+                    shutil.rmtree(d, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=str(e))
+        finally:
+            db.close()
+
     finally:
-        db.close()
+        lock.release()
 
 
 # ---------------------------------------------------------------------------
@@ -565,13 +588,13 @@ async def delete_module(module_id: str):
     # module_id can never escape MODULES_DIR when used in shutil.rmtree.
     module_id = _sanitize_module_id(module_id)
 
+    # AUDIT-31 DI-2: delete physical files BEFORE the DB row. If file
+    # deletion fails, the DB row remains intact for retry.
     db = get_db()
     try:
         row = db.execute("SELECT id FROM modules WHERE module_id=?", (module_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail=f"Module '{module_id}' not found")
-        db.execute("DELETE FROM modules WHERE module_id=?", (module_id,))
-        db.commit()
     finally:
         db.close()
 
@@ -582,7 +605,17 @@ async def delete_module(module_id: str):
         os.path.join(MODULES_DIR, module_id),
     ]:
         if os.path.isdir(d):
-            shutil.rmtree(d, ignore_errors=True)
+            # DI-2: do NOT ignore errors here. If physical deletion fails
+            # (e.g. a locked file), the exception propagates and the DB row
+            # stays intact for a clean retry.
+            shutil.rmtree(d)
+
+    db = get_db()
+    try:
+        db.execute("DELETE FROM modules WHERE module_id=?", (module_id,))
+        db.commit()
+    finally:
+        db.close()
 
     return {"message": f"Module '{module_id}' deleted successfully"}
 
@@ -592,35 +625,39 @@ async def generate_preview(req: GeneratePdfRequest, background_tasks: Background
     """Generate the exam + answer PDFs EXACTLY ONCE and persist them as a
     single 'Generation Artifact'. Both the preview and the ZIP download later
     consume this artifact, so what you preview is byte-for-byte what you get."""
-    ma_de = _validate_ma_de(req.ma_de)
-    selection = resolve_module_selection(req)
-    mids = {cat: sel["module_id"] for cat, sel in selection.items()}
+    # AUDIT-31 PERF-2: reject if both semaphore slots are occupied.
+    if _gen_semaphore.locked():
+        raise HTTPException(status_code=429, detail="Server is generating PDFs. Please retry in a moment.")
+    async with _gen_semaphore:
+        ma_de = _validate_ma_de(req.ma_de)
+        selection = resolve_module_selection(req)
+        mids = {cat: sel["module_id"] for cat, sel in selection.items()}
 
-    generation_id = uuid.uuid4().hex
-    pdir = os.path.join(GENERATIONS_DIR, generation_id)
-    os.makedirs(pdir, exist_ok=True)
+        generation_id = uuid.uuid4().hex
+        pdir = os.path.join(GENERATIONS_DIR, generation_id)
+        os.makedirs(pdir, exist_ok=True)
 
-    exam_path = os.path.join(pdir, "exam.pdf")
-    answer_path = os.path.join(pdir, "answer_key.pdf")
+        exam_path = os.path.join(pdir, "exam.pdf")
+        answer_path = os.path.join(pdir, "answer_key.pdf")
 
-    try:
-        ngay_thi_fmt = format_ngay_thi(req.ngay_thi)
-        await run_in_threadpool(build_exam_pdf, selection, ma_de, ngay_thi_fmt, exam_path)
-        await run_in_threadpool(build_answer_key_pdf, selection, ma_de, req.can_bo_ra_de, answer_path, ngay_thi=ngay_thi_fmt)
-        write_generation_manifest(pdir, ma_de, req.can_bo_ra_de, mids)
-    except Exception as e:
-        logger.exception("PDF generation failed for generation_id=%s ma_de=%s", generation_id, ma_de)
-        shutil.rmtree(pdir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
+        try:
+            ngay_thi_fmt = format_ngay_thi(req.ngay_thi)
+            await run_in_threadpool(build_exam_pdf, selection, ma_de, ngay_thi_fmt, exam_path)
+            await run_in_threadpool(build_answer_key_pdf, selection, ma_de, req.can_bo_ra_de, answer_path, ngay_thi=ngay_thi_fmt)
+            write_generation_manifest(pdir, ma_de, req.can_bo_ra_de, mids)
+        except Exception as e:
+            logger.exception("PDF generation failed for generation_id=%s ma_de=%s", generation_id, ma_de)
+            shutil.rmtree(pdir, ignore_errors=True)
+            raise HTTPException(status_code=500, detail=f"PDF generation failed: {e}")
 
-    # Deferred housekeeping: runs after the response is sent (Req 3), so old
-    # artifacts are pruned without blocking the request thread.
-    background_tasks.add_task(cleanup_old_generations, GENERATIONS_DIR)
-    return {
-        "generation_id": generation_id,
-        "exam_url": f"/api/generations/{generation_id}/exam.pdf",
-        "answer_url": f"/api/generations/{generation_id}/answer_key.pdf",
-    }
+        # Deferred housekeeping: runs after the response is sent (Req 3), so old
+        # artifacts are pruned without blocking the request thread.
+        background_tasks.add_task(cleanup_old_generations, GENERATIONS_DIR)
+        return {
+            "generation_id": generation_id,
+            "exam_url": f"/api/generations/{generation_id}/exam.pdf",
+            "answer_url": f"/api/generations/{generation_id}/answer_key.pdf",
+        }
 
 
 @app.get("/api/generations/{generation_id}/{filename}")
@@ -664,63 +701,66 @@ async def generate_download(req: DownloadRequest, background_tasks: BackgroundTa
     """Package the ALREADY-GENERATED artifact into a ZIP. This endpoint never
     regenerates PDFs — it locates the cached generation by ID and renames the
     files according to the delivery format, then bundles the module assets."""
-    ma_de = _validate_ma_de(req.ma_de)
-    generation_id = _validate_generation_id(req.generation_id)
+    if _gen_semaphore.locked():
+        raise HTTPException(status_code=429, detail="Server is generating PDFs. Please retry in a moment.")
+    async with _gen_semaphore:
+        ma_de = _validate_ma_de(req.ma_de)
+        generation_id = _validate_generation_id(req.generation_id)
 
-    pdir = os.path.join(GENERATIONS_DIR, generation_id)
-    if not os.path.isdir(pdir):
-        raise HTTPException(status_code=404, detail="Generation not found — hãy bấm Xem Trước trước khi tải ZIP")
+        pdir = os.path.join(GENERATIONS_DIR, generation_id)
+        if not os.path.isdir(pdir):
+            raise HTTPException(status_code=404, detail="Generation not found — hãy bấm Xem Trước trước khi tải ZIP")
 
-    exam_path = os.path.join(pdir, "exam.pdf")
-    answer_path = os.path.join(pdir, "answer_key.pdf")
-    if not os.path.isfile(exam_path) or not os.path.isfile(answer_path):
-        raise HTTPException(status_code=404, detail="Generation artifact incomplete")
+        exam_path = os.path.join(pdir, "exam.pdf")
+        answer_path = os.path.join(pdir, "answer_key.pdf")
+        if not os.path.isfile(exam_path) or not os.path.isfile(answer_path):
+            raise HTTPException(status_code=404, detail="Generation artifact incomplete")
 
-    manifest = read_generation_manifest(pdir)
-    if manifest.get("ma_de", "").strip() != ma_de:
-        raise HTTPException(status_code=400, detail="ma_de does not match this generation")
+        manifest = read_generation_manifest(pdir)
+        if manifest.get("ma_de", "").strip() != ma_de:
+            raise HTTPException(status_code=400, detail="ma_de does not match this generation")
 
-    selection = selection_from_module_ids(manifest["modules"])
+        selection = selection_from_module_ids(manifest["modules"])
 
-    zip_name = f"DLU_Exam_{ma_de}_{generation_id[:8]}.zip"
-    zip_path = os.path.join(OUTPUT_DIR, zip_name)
-    tmp_zip_path = zip_path + ".tmp"  # AUDIT-24 CV-2: never expose a half-written ZIP
-    try:
-        with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.write(exam_path, arcname=f"MaDe_{ma_de.upper()}.pdf")
-            zf.write(answer_path, arcname=f"DapAn_{ma_de.upper()}.pdf")
+        zip_name = f"DLU_Exam_{ma_de}_{generation_id[:8]}.zip"
+        zip_path = os.path.join(OUTPUT_DIR, zip_name)
+        tmp_zip_path = zip_path + ".tmp"  # AUDIT-24 CV-2: never expose a half-written ZIP
+        try:
+            with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(exam_path, arcname=f"MaDe_{ma_de.upper()}.pdf")
+                zf.write(answer_path, arcname=f"DapAn_{ma_de.upper()}.pdf")
 
-            excel_raw = os.path.join(selection["excel"]["dir"], "dlm_raw.xlsx")
-            if os.path.exists(excel_raw):
-                zf.write(excel_raw, arcname=f"DLM_{ma_de.upper()}.xlsx")
+                excel_raw = os.path.join(selection["excel"]["dir"], "dlm_raw.xlsx")
+                if os.path.exists(excel_raw):
+                    zf.write(excel_raw, arcname=f"DLM_{ma_de.upper()}.xlsx")
 
-            ppt_raw = os.path.join(selection["ppt"]["dir"], "dlm.pptx")
-            if os.path.exists(ppt_raw):
-                zf.write(ppt_raw, arcname="DLM.pptx")
+                ppt_raw = os.path.join(selection["ppt"]["dir"], "dlm.pptx")
+                if os.path.exists(ppt_raw):
+                    zf.write(ppt_raw, arcname="DLM.pptx")
 
-            for asset in list_module_images(selection["word"]["dir"]):
-                zf.write(asset, arcname=os.path.basename(asset))
-        # Atomic rename: concurrent readers only ever see a complete ZIP.
-        os.replace(tmp_zip_path, zip_path)
-    except Exception:
-        if os.path.exists(tmp_zip_path):
-            os.remove(tmp_zip_path)
-        raise
+                for asset in list_module_images(selection["word"]["dir"]):
+                    zf.write(asset, arcname=os.path.basename(asset))
+            # Atomic rename: concurrent readers only ever see a complete ZIP.
+            os.replace(tmp_zip_path, zip_path)
+        except Exception:
+            if os.path.exists(tmp_zip_path):
+                os.remove(tmp_zip_path)
+            raise
 
-    # AUDIT-24 CV-4: Content-Length lets the browser render a download
-    # progress bar on slow networks.
-    headers = {
-        "Content-Disposition": f'attachment; filename="{zip_name}"',
-        "Content-Length": str(os.path.getsize(zip_path)),
-    }
+        # AUDIT-24 CV-4: Content-Length lets the browser render a download
+        # progress bar on slow networks.
+        headers = {
+            "Content-Disposition": f'attachment; filename="{zip_name}"',
+            "Content-Length": str(os.path.getsize(zip_path)),
+        }
 
-    # AUDIT-24 CV-4: schedule deletion AFTER streaming finishes so repeated
-    # downloads of the same generation regenerate a fresh ZIP instead of
-    # accumulating disk usage in OUTPUT_DIR.
-    background_tasks.add_task(_remove_file_quietly, zip_path)
+        # AUDIT-24 CV-4: schedule deletion AFTER streaming finishes so repeated
+        # downloads of the same generation regenerate a fresh ZIP instead of
+        # accumulating disk usage in OUTPUT_DIR.
+        background_tasks.add_task(_remove_file_quietly, zip_path)
 
-    return StreamingResponse(
-        iter_file(zip_path),
-        media_type="application/zip",
-        headers=headers,
-    )
+        return StreamingResponse(
+            iter_file(zip_path),
+            media_type="application/zip",
+            headers=headers,
+        )
